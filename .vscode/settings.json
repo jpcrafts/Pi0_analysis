@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "processRootFile.C": "cpp",
+        "Pi_0_analysis.C": "cpp",
+        "tuple": "cpp",
+        "string": "cpp"
+    }
+}
