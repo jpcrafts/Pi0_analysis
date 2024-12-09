@@ -2,6 +2,8 @@
 #include <TTree.h>
 #include <TH1F.h>
 #include <TCanvas.h> // For drawing histograms
+#include <TPaveText.h> // Include for TPaveText
+#include <TLegend.h>
 #include <TText.h>   // For adding cut information to plots
 #include <TBranch.h>
 #include <TSystem.h>
@@ -107,17 +109,27 @@ void processRootFile(const std::string& inputFile, const std::string& outputDir,
 
     // Create a canvas for plotting
     TCanvas canvas("canvas", "Histograms", 800, 600);
+    canvas.SetLeftMargin(0.15); // Expand canvas to the left
+    canvas.SetBottomMargin(0.15); // Increase bottom margin to ensure enough space
     canvas.Print((pdfFilePath + "[").c_str()); // Start the PDF file
 
     // Draw each histogram with cut information and save to PDF
     for (const auto& [branchName, hist] : histograms) {
+        hist->SetStats(0); // Disable the default statistics box
         hist->Draw();
 
-        // Add cut information as a text label
-        TText cutInfo(0.1, 0.9, cutFormula.GetTitle());
-        cutInfo.SetNDC(); // Use normalized device coordinates
-        cutInfo.SetTextSize(0.03);
-        cutInfo.Draw();
+        // Create and move the legend to the upper-right corner, including the number of events
+        TLegend legend(0.7, 0.75, 0.9, 0.9); // Adjust position to the upper-right corner
+        legend.AddEntry(hist.get(), TString::Format("#splitline{%s}{Events: %d}", branchName.c_str(), static_cast<int>(hist->GetEntries())), "l");
+        legend.Draw();
+
+        // Add cut information in a resized text box above the x-axis label
+        TPaveText textBox(0.1, 0.03, 0.9, 0.08, "NDC"); // Adjusted position and size
+        textBox.AddText(cut.GetTitle());
+        textBox.SetTextSize(0.03); // Reduced font size
+        textBox.SetFillColor(0);   // Transparent background
+        textBox.SetBorderSize(0);  // Remove border
+        textBox.Draw();
 
         // Save the histogram to the PDF
         canvas.Print(pdfFilePath.c_str());
@@ -141,7 +153,7 @@ int main(int argc, char* argv[]) {
     int lastevent = std::stoi(argv[3]);
 
     // Define input file, output directory, and branches with histogram configurations
-    std::string inputFile = TString::Format("/cache/hallc/c-nps/analysis/online/replays/production/nps_hms_skim_%i_%i_%i.root", nrun, firstevent, lastevent).Data();
+    std::string inputFile = TString::Format("/cache/hallc/c-nps/analysis/pass1/replays/skim/nps_hms_skim_%i_%i_%i.root", nrun, firstevent, lastevent).Data();
     std::string outputDir = "/volatile/hallc/nps/jpcrafts/ROOTfiles";
 
     std::map<std::string, std::tuple<std::string, std::string, int, float, float>> branchHistMap = {

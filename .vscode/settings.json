@@ -3,6 +3,7 @@
         "processRootFile.C": "cpp",
         "Pi_0_analysis.C": "cpp",
         "tuple": "cpp",
-        "string": "cpp"
+        "string": "cpp",
+        "PeterB.C": "cpp"
     }
 }
