@@ -4,6 +4,10 @@
         "Pi_0_analysis.C": "cpp",
         "tuple": "cpp",
         "string": "cpp",
-        "PeterB.C": "cpp"
+        "PeterB.C": "cpp",
+        "Pi_0_timing.C": "cpp",
+        "ShowClusT.C": "cpp",
+        "ShowClusTWithHistogram.C": "cpp",
+        "ostream": "cpp"
     }
 }
