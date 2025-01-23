@@ -1,0 +1,10 @@
+# Ignore object files and executables
+*.o
+*.exe
+
+# Ignore the 'blocktimes' directory
+blocktimes/
+
+# Ignore backup or temporary files
+*~
+.*.swp
