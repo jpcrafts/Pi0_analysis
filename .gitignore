@@ -8,3 +8,6 @@ blocktimes/
 # Ignore backup or temporary files
 *~
 .*.swp
+
+# Ignore the grep_rvardef
+grep_rvardef_variables_output.txt
