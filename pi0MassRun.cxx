@@ -190,9 +190,9 @@ int main(int argc, char *argv[])
     hMgg->Draw();
 
     // define a gaussian around [0.12..0.15]
-    TF1 *fitGauss = new TF1("fitGauss","gaus",0.12,0.15);
+    TF1 *fitGauss = new TF1("fitGauss","gaus",0.12,0.145);
     fitGauss->SetLineColor(kRed);
-    fitGauss->SetParameters(300.,0.135,0.01);
+    //fitGauss->SetParameters(300.,0.135,0.01);
 
     hMgg->Fit(fitGauss,"R");
 

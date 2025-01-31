@@ -47,7 +47,7 @@ int main(int argc, char** argv)
     // 1) Parse arguments
     std::string fileName = argv[1];
     double fitMin = 0.12;
-    double fitMax = 0.15;
+    double fitMax = 0.145;
     if (argc > 2) fitMin = std::stod(argv[2]);
     if (argc > 3) fitMax = std::stod(argv[3]);
 
