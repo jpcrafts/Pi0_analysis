@@ -2,8 +2,10 @@
 *.o
 *.exe
 
-# Ignore the 'blocktimes' directory
+# Ignore the 'blocktimes' directory & ROOTfiles symlink
 blocktimes/
+ROOTfiles
+Plots
 
 # Ignore backup or temporary files
 *~
