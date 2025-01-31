@@ -6,6 +6,7 @@
 blocktimes/
 ROOTfiles
 Plots
+VolatileROOTfiles
 
 # Ignore backup or temporary files
 *~
