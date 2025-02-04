@@ -8,6 +8,7 @@
         "Pi_0_timing.C": "cpp",
         "ShowClusT.C": "cpp",
         "ShowClusTWithHistogram.C": "cpp",
-        "ostream": "cpp"
+        "ostream": "cpp",
+        "runTimingAnalysis.C": "cpp"
     }
 }
