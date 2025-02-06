@@ -20,9 +20,10 @@
 // HPC/EDTM TCut
 TString HPCcut =
   "T.hms.hEDTM_tdcTimeRaw<0.1 && "
-  "H.gtr.dp>-12 && H.gtr.dp<12 && "
+  "H.gtr.dp>-8.5 && H.gtr.dp<8.5 && "
   "H.cal.etotnorm>0.6 && "
   "H.cer.npeSum>1.0";
+  //HMS Colimaotor cut xptar and yptr at abs <.1
 
 // Distance from target to NPS in cm (6.07 m)
 static const double DNPS = 607.0;
