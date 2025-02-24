@@ -1,27 +1,26 @@
 // File: runTimingAnalysis.cpp
 // Description:
 //   1) Reads a ROOT file from a specified directory,
-//   2) Applies HMS cuts and fills two 1D timing histograms using TTreeReader,
-//      and also fills two 2D maps using the detector geometry (36 rows x 30 columns):
-//         - A Block Contribution Map (TH2F) and an Alternative Block Deviation Map (TH2F),
-//           (these 2D maps are disabled in this version).
-//   3) Additionally, the script fits:
-//         - The Raw Cluster Time histogram (background subtracted) with a pure Gaussian,
-//         - The Good Cluster Block Time histogram with a Gaussian plus constant background,
-//         - The In-Time ADC-TDC Diff Time histogram (hIntime) with a Gaussian plus constant background,
-//         - The In-Time Cluster Time histogram (hIntimeClusters) now filled using block-level ADC-TDC diff times,
-//           but only from the two clusters whose clusT values are closest to 155.5 ns.
-//   4) A combined canvas is drawn for four 1D histograms arranged in a 2×2 grid.
-//   5) For the "intime" selection, an event must pass all HMS cuts and have at least two clusters
-//      with clusE > 0.6 and clusT in [150,160] ns such that at least one pair is within ±3 ns.
-//      For such events, block ADC-TDC diff times fill hIntime,
-//      and hIntimeClusters is filled only for blocks associated with the two clusters closest to 155.5 ns.
-//   6) All histograms are defined with a range from 100 to 200 ns.
+//   2) Applies HMS cuts (including the H.gtr.th cut) and fills several 1D timing histograms using TTreeReader,
+//      (2D maps are disabled in this version).
+//   3) The code applies block-level timing offsets (from a CSV file) to each block's ADC-TDC diff time.
+//   4) It computes new energy–weighted cluster times (newClusterTimes) from the corrected block times.
+//   5) Histograms are filled as follows:
+//         - hClusterTime: Filled with raw cluster times (clusT) from the file.
+//         - hNewClusterTime: Filled with new energy–weighted cluster times computed from corrected block times.
+//         - hGoodBlockTime, hIntime, and hIntimeClusters are filled per block using corrected block times,
+//           with selection criteria based on the newClusterTimes.
+//         - For hIntimeClusters, only blocks from the two best clusters (those with newClusterTimes closest to 150 ns) are used.
+//   6) A canvas is arranged in a 3×2 layout as follows:
+//         Top row: Pad 1 = hClusterTime, Pad 2 = hNewClusterTime, Pad 3 = hGoodBlockTime.
+//         Bottom row: Pad 4 = hIntime, Pad 5 = hIntimeClusters, Pad 6 = HMS Cuts Summary.
+//   7) Every 10k events, progress is printed to cout.
+//   8) The HMS cut values are defined as constants so that changing them updates both the selection and the summary.
 //   
 // Compile with:
 //   g++ -O2 -o runTimingAnalysis runTimingAnalysis.cpp `root-config --cflags --libs`
 // Run with:
-//   ./runTimingAnalysis <nrun>
+//   ./runTimingAnalysis <nrun> <offset_csv_file>
 //
 // Note: Requires ROOT 6 or later.
 
@@ -35,7 +34,7 @@
 #include "TCanvas.h"
 #include "TPad.h"
 #include "TF1.h"
-#include "TPaveText.h" // Used only for pads 1 and 2
+#include "TPaveText.h" // For annotation and summary text
 #include "TString.h"
 #include "TSystem.h"
 #include "TStyle.h"
@@ -45,38 +44,74 @@
 #include <cstdlib>
 #include <vector>
 #include <limits>
-#include <algorithm> // For std::sort and fabs
+#include <algorithm>
+#include <map>
+#include <fstream>
+#include <sstream>
 
 using namespace std;
+
+// HMS cut constants.
+const double edtmtdcCut = 0.1;
+const double hdeltaLow = -8.5;
+const double hdeltaHigh = 8.5;
+const double hcaltotCut = 0.6;
+const double hcernpeCut = 1.0;
+const double gtrthCut = 0.09;
 
 static const int ROWS = 36;
 static const int COLS = 30;
 static const int N_BLOCKS = ROWS * COLS;
 
-int main(int argc, char *argv[])
-{
-   if (argc < 2)
-   {
-      cout << "Usage: " << argv[0] << " <nrun>" << endl;
+// Helper function to load block timing offsets from a CSV file.
+std::map<int, double> loadOffsets(const char* filename) {
+   std::map<int, double> offsets;
+   ifstream file(filename);
+   if (!file.is_open()){
+      cout << "Error opening CSV file " << filename << endl;
+      return offsets;
+   }
+   string line;
+   // Skip header line.
+   getline(file, line);
+   while(getline(file, line)) {
+      if(line.empty()) continue;
+      istringstream ss(line);
+      string blockStr, offsetStr, qualityStr;
+      if(getline(ss, blockStr, ',') && getline(ss, offsetStr, ',') && getline(ss, qualityStr, ',')) {
+         try {
+            int blockID = stoi(blockStr);
+            double offset = stod(offsetStr);
+            offsets[blockID] = offset;
+         } catch(const exception &e) {
+            cout << "Error parsing line: " << line << " (" << e.what() << ")" << endl;
+         }
+      }
+   }
+   file.close();
+   return offsets;
+}
+
+int main(int argc, char *argv[]){
+   if(argc < 3){
+      cout << "Usage: " << argv[0] << " <nrun> <offset_csv_file>" << endl;
       return 1;
    }
 
-   // Enable full fit stats.
-   gStyle->SetOptFit(1111);
+   // Load block-level offsets.
+   map<int, double> blockOffset = loadOffsets(argv[2]);
 
+   gStyle->SetOptFit(1111);
    int nrun = atoi(argv[1]);
    TString inFileName = Form("/cache/hallc/c-nps/analysis/pass1/replays/skim/nps_hms_skim_%d_1_-1.root", nrun);
    TFile *f = TFile::Open(inFileName, "READ");
-   if (!f || f->IsZombie())
-   {
+   if(!f || f->IsZombie()){
       cout << "Error opening file " << inFileName << endl;
       return 1;
    }
 
-   // Get the TTree and disable unused branches.
    TTree *tree = (TTree *)f->Get("T");
-   if (!tree)
-   {
+   if(!tree){
       cout << "Error: TTree 'T' not found in file " << inFileName << endl;
       return 1;
    }
@@ -91,8 +126,8 @@ int main(int argc, char *argv[])
    tree->SetBranchStatus("NPS.cal.fly.goodAdcTdcDiffTime", 1);
    tree->SetBranchStatus("NPS.cal.fly.e", 1);
    tree->SetBranchStatus("NPS.cal.fly.block_clusterID", 1);
+   tree->SetBranchStatus("H.gtr.th", 1);
 
-   // Create a TTreeReader.
    TTreeReader reader(tree);
    TTreeReaderValue<Double_t> nclust(reader, "NPS.cal.nclust");
    TTreeReaderArray<Double_t> clusT(reader, "NPS.cal.clusT");
@@ -104,169 +139,160 @@ int main(int argc, char *argv[])
    TTreeReaderArray<Double_t> block_t(reader, "NPS.cal.fly.goodAdcTdcDiffTime");
    TTreeReaderArray<Double_t> block_e(reader, "NPS.cal.fly.e");
    TTreeReaderArray<Double_t> block_clusterID(reader, "NPS.cal.fly.block_clusterID");
+   TTreeReaderValue<Double_t> gtrth(reader, "H.gtr.th");
 
-   // Create 1D histograms with range 100 to 200 ns.
+   // Define histograms.
    TH1F *hClusterTime = new TH1F("hClusterTime", "Raw Cluster Time Histogram (HMS Cuts);Cluster Time (ns);Counts", 200, 100, 200);
-   TH1F *hGoodBlockTime = new TH1F("hGoodBlockTime", "Good Cluster Block Time Histogram;Block Time (ns);Counts", 200, 100, 200);
-   TH1F *hIntime = new TH1F("hIntime", "In-Time ADC-TDC Diff Time;ADC-TDC Diff Time (ns);Counts", 200, 100, 200);
-   hIntime->SetLineColor(kBlue); // Dark blue.
-   // hIntimeClusters will now be filled using block data,
-   // but only from blocks associated with the two clusters whose clusT are closest to 155.5 ns.
-   TH1F *hIntimeClusters = new TH1F("hIntimeClusters", "In-Time Cluster Time Histogram (selected clusters);ADC-TDC Diff Time (ns);Counts", 200, 100, 200);
+   TH1F *hNewClusterTime = new TH1F("hNewClusterTime", "New Energy Weighted Cluster Time;Cluster Time (ns);Counts", 200, 100, 200);
+   TH1F *hGoodBlockTime = new TH1F("hGoodBlockTime", "Good Cluster Block Time Histogram;ADC-TDC Diff Time (ns);Counts", 200, 120, 180);
+   TH1F *hIntime = new TH1F("hIntime", "In-Time ADC-TDC Diff Time;ADC-TDC Diff Time (ns);Counts", 200, 120, 180);
+   hIntime->SetLineColor(kBlue);
+   TH1F *hIntimeClusters = new TH1F("hIntimeClusters", "In-Time Cluster Time Histogram (selected clusters);ADC-TDC Diff Time (ns);Counts", 200, 140, 160);
 
-   // (2D maps and hAvgDiff are disabled as before.)
-
-   // Loop over events.
+   // --- Loop over events ---
    int processedEvents = 0;
-   while (reader.Next())
-   {
-      // Apply HMS cuts.
-      if (*edtmtdc >= 0.1 || *hdelta <= -12 || *hdelta >= 12 || *hcaltot <= 0.6 || *hcernpe <= 1.0)
+   while(reader.Next()){
+      // HMS cuts.
+      if(*edtmtdc >= edtmtdcCut || *hdelta <= hdeltaLow || *hdelta >= hdeltaHigh ||
+         *hcaltot <= hcaltotCut || *hcernpe <= hcernpeCut)
+         continue;
+      if(fabs(*gtrth) > gtrthCut)
          continue;
 
       processedEvents++;
       int numClus = static_cast<int>(*nclust);
-      vector<bool> goodCluster(numClus, false);
 
-      // Fill the raw cluster time histogram and mark "good" clusters.
-      for (int i = 0; i < numClus; i++)
-      {
+      // Fill hClusterTime using raw cluster times.
+      for (int i = 0; i < numClus; i++){
          double tVal = clusT[i];
-         if (tVal > 100 && tVal < 200)
+         if(tVal > 100 && tVal < 200)
             hClusterTime->Fill(tVal);
-         // Mark a cluster as good if it passes the energy cut and a time window (130-170 ns).
-         if (clusE[i] > 0.6 && tVal > 130 && tVal < 170)
-            goodCluster[i] = true;
       }
 
-      // For "intime" selection: require clusters with clusE > 0.6 and clusT in [150,160] ns.
+      // --- Compute corrected block times once per block ---
+      int nBlocks_evt = block_t.GetSize();
+      vector<double> correctedBlockTimes(nBlocks_evt, -1);
+      for (int ib = 0; ib < nBlocks_evt; ib++){
+         double offset = (blockOffset.find(ib) != blockOffset.end()) ? blockOffset[ib] : 0.0;
+         correctedBlockTimes[ib] = block_t[ib] + offset;
+      }
+
+      // --- Compute new energy-weighted cluster times using corrected block times ---
+      vector<double> newClusterTimes(numClus, -1);
+      for (int i = 0; i < numClus; i++){
+         double sumWeightedTime = 0.0;
+         double sumEnergy = 0.0;
+         for (int ib = 0; ib < nBlocks_evt; ib++){
+            int cid = static_cast<int>(block_clusterID[ib]);
+            if(cid == i){
+               double energy = block_e[ib];
+               if(energy > 0){
+                  sumWeightedTime += correctedBlockTimes[ib] * energy;
+                  sumEnergy += energy;
+               }
+            }
+         }
+         if(sumEnergy > 0)
+            newClusterTimes[i] = sumWeightedTime / sumEnergy;
+      }
+      // Fill hNewClusterTime histogram.
+      for (int i = 0; i < numClus; i++){
+         if(newClusterTimes[i] > 0)
+            hNewClusterTime->Fill(newClusterTimes[i]);
+      }
+
+      // --- Use newClusterTimes for selection for the last three histograms ---
+      vector<bool> goodCluster(numClus, false);
       vector<double> narrowTimes;
-      narrowTimes.reserve(numClus);  // Preallocate for efficiency.
-      for (int i = 0; i < numClus; i++)
-      {
-         if (clusE[i] > 0.6 && clusT[i] >= 150 && clusT[i] <= 160)
-            narrowTimes.push_back(clusT[i]);
+      narrowTimes.reserve(numClus);
+      for (int i = 0; i < numClus; i++){
+         if(clusE[i] > 0.6 && newClusterTimes[i] > 130 && newClusterTimes[i] < 170)
+            goodCluster[i] = true;
+         if(clusE[i] > 0.6 && newClusterTimes[i] >= 147 && newClusterTimes[i] <= 153)
+            narrowTimes.push_back(newClusterTimes[i]);
       }
-
-      // Use a sorted approach to check if any two cluster times are within ±3 ns.
       bool intimeEvent = false;
-      if (narrowTimes.size() >= 2)
-      {
+      if(narrowTimes.size() >= 2){
          sort(narrowTimes.begin(), narrowTimes.end());
-         for (size_t i = 0; i < narrowTimes.size() - 1; i++)
-         {
-            if ((narrowTimes[i+1] - narrowTimes[i]) <= 3)
-            {
+         for(size_t i = 0; i < narrowTimes.size()-1; i++){
+            if((narrowTimes[i+1] - narrowTimes[i]) <= 2){
                intimeEvent = true;
                break;
             }
          }
       }
-
-      // Fill the 1D Good Cluster Block Time histogram from block data.
-      int nBlocks_evt = block_t.GetSize();
-      for (int ib = 0; ib < nBlocks_evt; ib++)
-      {
-         int cid = static_cast<int>(block_clusterID[ib]);
-         if (cid >= 0 && cid < numClus && goodCluster[cid])
-         {
-            if (block_e[ib] > 0)
-            {
-               double bTime = block_t[ib];
-               if (bTime > 100 && bTime < 200)
-                  hGoodBlockTime->Fill(bTime);
-            }
-         }
-      }
-
-      // For the fourth histogram, select the two clusters (from those with clusE > 0.6 and clusT in [150,160])
-      // that are closest to 155.5 ns.
-      int bestIndex = -1;
-      int secondBestIndex = -1;
-      double bestDiff = std::numeric_limits<double>::max();
-      double secondBestDiff = std::numeric_limits<double>::max();
-      for (int i = 0; i < numClus; i++)
-      {
-         if (clusE[i] > 0.6 && clusT[i] >= 150 && clusT[i] <= 160)
-         {
-            double diff = fabs(clusT[i] - 155.5);
-            if (diff < bestDiff)
-            {
+      
+      // --- Determine the two best clusters based on newClusterTimes (closest to 150 ns) ---
+      int bestIndex = -1, secondBestIndex = -1;
+      double bestDiff = numeric_limits<double>::max();
+      double secondBestDiff = numeric_limits<double>::max();
+      for (int i = 0; i < numClus; i++){
+         if(clusE[i] > 0.6 && newClusterTimes[i] > 0){
+            double diff = fabs(newClusterTimes[i] - 150.0);
+            if(diff < bestDiff){
                secondBestDiff = bestDiff;
                secondBestIndex = bestIndex;
-               bestDiff = diff;
-               bestIndex = i;
-            }
-            else if (diff < secondBestDiff)
-            {
+              	bestDiff = diff;
+              	bestIndex = i;
+            } else if(diff < secondBestDiff){
                secondBestDiff = diff;
-               secondBestIndex = i;
+              	secondBestIndex = i;
             }
          }
       }
-
-      // If the event qualifies as "intime", loop over blocks to fill the histograms.
-      if (intimeEvent)
-      {
-         for (int ib = 0; ib < nBlocks_evt; ib++)
-         {
-            int cid = static_cast<int>(block_clusterID[ib]);
-            if (cid >= 0 && cid < numClus && goodCluster[cid])
-            {
-               if (block_e[ib] > 0)
-               {
-                  double bTime = block_t[ib];
-                  if (bTime > 100 && bTime < 200)
-                  {
-                     // Fill hIntime with all blocks passing the criteria.
-                     hIntime->Fill(bTime);
-                     // For hIntimeClusters, fill only if the block is associated with one of the two chosen clusters.
-                     if (cid == bestIndex || cid == secondBestIndex)
-                        hIntimeClusters->Fill(bTime);
+      
+      // --- Fill block-level histograms using corrected block times ---
+      for (int ib = 0; ib < nBlocks_evt; ib++){
+         int cid = static_cast<int>(block_clusterID[ib]);
+         if(cid >= 0 && cid < numClus && goodCluster[cid]){
+            if(block_e[ib] > 0){
+               double newBlockTime = correctedBlockTimes[ib];
+               if(newBlockTime > 100 && newBlockTime < 200){
+                  hGoodBlockTime->Fill(newBlockTime);
+                  if(intimeEvent){
+                     hIntime->Fill(newBlockTime);
+                     if(cid == bestIndex || cid == secondBestIndex)
+                        hIntimeClusters->Fill(newBlockTime);
                   }
                }
             }
          }
       }
+      
+      // Print progress every 10k events.
+      if(processedEvents % 10000 == 0)
+         cout << "Processed " << processedEvents << " events..." << endl;
    }
    cout << "Processed " << processedEvents << " events for run " << nrun << endl;
 
    // ------------------------------
-   // Fit the Raw Cluster Time Histogram (background subtraction method)
+   // Fitting routines
    // ------------------------------
-   double fitRangeMinVal = 150.0;
-   double fitRangeMaxVal = 160.0;
-
+   double fitRangeMinVal = 145.0, fitRangeMaxVal = 155.0;
    TF1 *bgLeftFit = new TF1("bgLeft", "pol2", 117, fitRangeMinVal);
    hClusterTime->Fit(bgLeftFit, "R+");
    TF1 *bgRightFit = new TF1("bgRight", "pol2", fitRangeMaxVal, 184);
    hClusterTime->Fit(bgRightFit, "R+");
 
    TH1F *hClusterTimeNoBg = (TH1F *)hClusterTime->Clone("hClusterTimeNoBg");
-   for (int bin = 1; bin <= hClusterTime->GetNbinsX(); bin++)
-   {
+   for (int bin = 1; bin <= hClusterTime->GetNbinsX(); bin++){
       double binCenter = hClusterTime->GetBinCenter(bin);
       double origContent = hClusterTime->GetBinContent(bin);
       double bgVal = (binCenter < fitRangeMinVal) ? bgLeftFit->Eval(binCenter) : bgRightFit->Eval(binCenter);
       double newContent = origContent - bgVal;
       hClusterTimeNoBg->SetBinContent(bin, newContent);
    }
-
    TF1 *gausFitRaw = new TF1("gausFitRaw", "gaus", fitRangeMinVal, fitRangeMaxVal);
    hClusterTimeNoBg->Fit(gausFitRaw, "R");
    double meanFit = gausFitRaw->GetParameter(1);
    double sigmaFit = gausFitRaw->GetParameter(2);
-   cout << "Raw Cluster Time Fit (background subtracted): Mean = " << meanFit
+   cout << "Raw Cluster Time Fit (background subtracted): Mean = " << meanFit 
         << " ns, Sigma = " << sigmaFit << " ns" << endl;
 
-   // ------------------------------
-   // Fit the Good Cluster Block Time Histogram with a Gaussian plus constant background.
-   // ------------------------------
-   double fitRangeBlockMinVal = 152.0;
-   double fitRangeBlockMaxVal = 158.0;
+   double fitRangeBlockMinVal = 147.0, fitRangeBlockMaxVal = 153.0;
    TF1 *gausPlusBGBlockFit = new TF1("gausPlusBGBlock", "[0]*exp(-0.5*((x-[1])/[2])^2)+[3]",
                                      fitRangeBlockMinVal, fitRangeBlockMaxVal);
-   gausPlusBGBlockFit->SetParameters(60000, 155, 1.0, 100);
+   gausPlusBGBlockFit->SetParameters(60000, 150, 1.0, 100);
    hGoodBlockTime->Fit(gausPlusBGBlockFit, "R");
    double ampBlock = gausPlusBGBlockFit->GetParameter(0);
    double meanBlock = gausPlusBGBlockFit->GetParameter(1);
@@ -278,35 +304,31 @@ int main(int argc, char *argv[])
         << "  Sigma     = " << sigmaBlock << " ns" << endl
         << "  BG const  = " << constBlock << endl;
 
-   // ------------------------------
-   // Fit the In-Time Histogram (blocks) with a Gaussian plus constant background.
-   // ------------------------------
-   TF1 *gausPlusBGIntime = new TF1("gausPlusBGIntime", "[0]*exp(-0.5*((x-[1])/[2])^2)+[3]", 150, 160);
-   gausPlusBGIntime->SetParameters(12000, 155, 1.0, 2000);
+   TF1 *gausPlusBGIntime = new TF1("gausPlusBGIntime", "[0]*exp(-0.5*((x-[1])/[2])^2)+[3]", 145, 155);
+   gausPlusBGIntime->SetParameters(12000, 150, 1.0, 2000);
    hIntime->Fit(gausPlusBGIntime, "R");
    double meanIntime = gausPlusBGIntime->GetParameter(1);
    double sigmaIntime = gausPlusBGIntime->GetParameter(2);
    cout << "In-Time Histogram Fit: Mean = " << meanIntime << " ns, Sigma = " << sigmaIntime << " ns" << endl;
 
-   // ------------------------------
-   // Fit the In-Time Cluster Time Histogram with a Gaussian plus constant background.
-   // ------------------------------
-   TF1 *gausPlusBGIntimeClust = new TF1("gausPlusBGIntimeClust","gaus", 154, 157);
-   gausPlusBGIntimeClust->SetParameters(1500, 155.5, 1.0);
-   hIntimeClusters->Fit(gausPlusBGIntimeClust, "R");
-   double meanIntimeClust = gausPlusBGIntimeClust->GetParameter(1);
-   double sigmaIntimeClust = gausPlusBGIntimeClust->GetParameter(2);
-   cout << "In-Time Cluster Time Histogram Fit:" << endl
-        << "  Mean  = " << meanIntimeClust << " ns" << endl
-        << "  Sigma = " << sigmaIntimeClust << " ns" << endl;
+   TF1 *doubleGausIntimeClust = new TF1("doubleGausIntimeClust",
+         "[0]*exp(-0.5*((x-[1])/[2])^2)+[3]*exp(-0.5*((x-[4])/[5])^2)", 148, 152);
+   doubleGausIntimeClust->SetParameters(1500, 150, 0.5, 500, 150, 1.0);
+   hIntimeClusters->Fit(doubleGausIntimeClust, "R");
+   double meanIntimeClust1 = doubleGausIntimeClust->GetParameter(1);
+   double sigmaIntimeClust1 = doubleGausIntimeClust->GetParameter(2);
+   double meanIntimeClust2 = doubleGausIntimeClust->GetParameter(4);
+   double sigmaIntimeClust2 = doubleGausIntimeClust->GetParameter(5);
+   cout << "In-Time Cluster Time Histogram Double Gaussian Fit:" << endl
+        << "  First Gaussian:  Mean = " << meanIntimeClust1 << " ns, Sigma = " << sigmaIntimeClust1 << " ns" << endl
+        << "  Second Gaussian: Mean = " << meanIntimeClust2 << " ns, Sigma = " << sigmaIntimeClust2 << " ns" << endl;
 
-   TString outDir = "/volatile/hallc/nps/jpcrafts/Plots";
-   gSystem->Exec(Form("mkdir -p %s", outDir.Data()));
-
+   // --- Create a canvas with 3 columns and 2 rows in rearranged order ---
    TCanvas *c1_all = new TCanvas("c1_all", "All 1D Histograms", 2100, 1200);
-   c1_all->Divide(2, 2);
+   c1_all->Divide(3,2);
 
-   // Pad 1: Raw Cluster Time Histogram.
+   // Top row:
+   // Pad 1: hClusterTime (Raw Cluster Time)
    c1_all->cd(1);
    hClusterTime->SetStats(0);
    hClusterTime->SetLineColor(kBlue);
@@ -315,59 +337,56 @@ int main(int argc, char *argv[])
    hClusterTimeNoBg->Draw("hist same");
    gausFitRaw->SetLineColor(kMagenta);
    gausFitRaw->Draw("same");
-   bgLeftFit->SetLineColor(kGreen);
-   bgLeftFit->SetLineStyle(2);
-   bgLeftFit->Draw("same");
-   bgRightFit->SetLineColor(kGreen);
-   bgRightFit->SetLineStyle(2);
-   bgRightFit->Draw("same");
-   TPaveText *pt1 = new TPaveText(0.65, 0.75, 0.90, 0.85, "NDC");
-   pt1->AddText(Form("Mean = %.2f ns", meanFit));
-   pt1->AddText(Form("Sigma = %.2f ns", sigmaFit));
-   pt1->SetFillColor(0);
-   pt1->SetBorderSize(0);
-   pt1->Draw();
 
-   // Pad 2: Good Cluster Block Time Histogram.
+   // Pad 2: hNewClusterTime (New Energy Weighted Cluster Time)
    c1_all->cd(2);
+   hNewClusterTime->SetStats(0);
+   hNewClusterTime->SetLineColor(kBlue);
+   hNewClusterTime->Draw("hist");
+
+   // Pad 3: hGoodBlockTime (Good Cluster Block Time)
+   c1_all->cd(3);
    hGoodBlockTime->SetStats(1);
    hGoodBlockTime->SetLineColor(kBlue);
    hGoodBlockTime->Draw("hist");
    gausPlusBGBlockFit->SetLineColor(kMagenta);
    gausPlusBGBlockFit->Draw("same");
-   TPaveText *pt2 = new TPaveText(meanBlock - 1, hGoodBlockTime->GetMaximum() * 0.75,
-                                  meanBlock + 1, hGoodBlockTime->GetMaximum() * 0.85, "brNDC");
-   pt2->AddText(Form("Amp = %.0f", ampBlock));
-   pt2->AddText(Form("Mean = %.2f ns", meanBlock));
-   pt2->AddText(Form("Sigma = %.2f ns", sigmaBlock));
-   pt2->AddText(Form("BG const = %.0f", constBlock));
-   pt2->SetFillColor(0);
-   pt2->SetBorderSize(0);
-   pt2->Draw();
 
-   // Pad 3: In-Time Histogram (blocks).
-   c1_all->cd(3);
+   // Bottom row:
+   // Pad 4: hIntime (Raw In-Time ADC-TDC Diff Time)
+   c1_all->cd(4);
    hIntime->SetStats(1);
    hIntime->SetLineColor(kBlue);
    hIntime->Draw("hist");
    gausPlusBGIntime->SetLineColor(kMagenta);
    gausPlusBGIntime->Draw("same");
 
-   // Pad 4: In-Time Histogram (clusters, selected clusters only).
-   c1_all->cd(4);
+   // Pad 5: hIntimeClusters (In-Time Cluster Time for Selected Clusters)
+   c1_all->cd(5);
    hIntimeClusters->SetStats(1);
    hIntimeClusters->SetLineColor(kBlue);
    hIntimeClusters->Draw("hist");
-   gausPlusBGIntimeClust->SetLineColor(kMagenta);
-   gausPlusBGIntimeClust->Draw("same");
+   doubleGausIntimeClust->SetLineColor(kMagenta);
+   doubleGausIntimeClust->Draw("same");
 
-   c1_all->SaveAs(Form("%s/All1DHistograms_run%d.png", outDir.Data(), nrun));
+   // Pad 6: HMS Cuts Summary (and progress info)
+   c1_all->cd(6);
+   TPaveText *ptSummary = new TPaveText(0.05, 0.05, 0.95, 0.95, "NDC");
+   ptSummary->AddText(Form("Run %d HMS Cuts Summary:", nrun));
+   ptSummary->AddText(Form("T.hms.hEDTM_tdcTimeRaw < %.2f", edtmtdcCut));
+   ptSummary->AddText(Form("H.gtr.dp between %.0f and %.0f", hdeltaLow, hdeltaHigh));
+   ptSummary->AddText(Form("H.cal.etotnorm > %.2f", hcaltotCut));
+   ptSummary->AddText(Form("H.cer.npeSum > %.1f", hcernpeCut));
+   ptSummary->AddText(Form("H.gtr.th within ±%.2f", gtrthCut));
+   ptSummary->AddText("");
+   ptSummary->AddText(Form("Processed %d events", processedEvents));
+   ptSummary->SetFillColor(0);
+   ptSummary->SetBorderSize(0);
+   ptSummary->Draw();
 
-   // (2D maps drawing is disabled.)
+   c1_all->SaveAs(Form("/volatile/hallc/nps/jpcrafts/Plots/All1DHistograms_run%d.png", nrun));
 
-   // Cleanup.
    f->Close();
    delete f;
-
    return 0;
 }

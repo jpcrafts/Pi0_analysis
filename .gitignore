@@ -14,3 +14,15 @@ VolatileROOTfiles
 
 # Ignore the grep_rvardef
 grep_rvardef_variables_output.txt
+
+# Ignore these items 
+*.root
+*.pdf
+*.png
+*.txt
+*.log
+*.dat
+*.csv
+check_evnum*
+
+

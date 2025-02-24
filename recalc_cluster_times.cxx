@@ -2,14 +2,24 @@
 //
 // This program reads a ROOT file containing NPS replay data,
 // selects a subset of branches, recalculates the cluster times using block-level timing offsets,
-// and writes out a new slimmed ROOT file that contains these branches plus an extra branch
-// "NPS.cal.newClusT" which holds the new, energy-weighted cluster times.
+// and writes out a new slimmed ROOT file that contains these branches plus two extra branches:
+//   "NPS.cal.newEWClusT" holds the energy-weighted cluster times,
+//   "NPS.cal.newClusT" holds the simple (arithmetic) average cluster times.
+//
+// HMS-level branches include T.hms.hEDTM_tdcTimeRaw, H.gtr.dp, H.cal.etotnorm,
+// H.cer.npeSum, H.gtr.th, and now H.gtr.ph.
+// HMS cuts applied are:
+//   T.hms.hEDTM_tdcTimeRaw < 0.1,
+//   H.gtr.dp between -8.5 and 8.5,
+//   H.cal.etotnorm > 0.6,
+//   H.cer.npeSum > 1.0,
+//   |H.gtr.th| < 0.09,
+//   |H.gtr.ph| < 0.09
 //
 // Usage:
 //   ./recalc_cluster_times_slim <RunNumber> <offset_csv_file> <MaxEvents> <output_root_file>
 //
 // Use MaxEvents = -1 to process all events.
-//
 // Example:
 //   ./recalc_cluster_times_slim 972 Offsets_4205.csv -1 4196_newClusT.root
 
@@ -25,7 +35,8 @@
 
 using namespace std;
 
-// Helper function to load block-level timing offsets from a CSV file.
+// Modified helper function: reads only the first two columns from the CSV
+// and checks that the first data line starts with block 0.
 std::map<int, double> loadOffsets(const char* filename) {
     std::map<int, double> offsets;
     ifstream file(filename);
@@ -36,19 +47,39 @@ std::map<int, double> loadOffsets(const char* filename) {
     string line;
     // Skip header
     getline(file, line);
+    bool firstDataLine = true;
     while(getline(file, line)) {
         if(line.empty()) continue;
         istringstream ss(line);
-        string blockStr, offsetStr, quality;
-        if(getline(ss, blockStr, ',') && getline(ss, offsetStr, ',') && getline(ss, quality, ',')) {
-            try {
-                int blockID = stoi(blockStr);
-                double offset = stod(offsetStr);
-                offsets[blockID] = offset;
-            } catch (std::exception &e) {
-                cout << "Error parsing line: " << line << " (" << e.what() << ")" << endl;
-            }
+        string blockToken, offsetToken;
+        
+        if(!getline(ss, blockToken, ',')) continue;
+        int blockID;
+        try {
+            blockID = stoi(blockToken);
+        } catch (std::exception &e) {
+            cout << "Error parsing blockID in line: " << line << " (" << e.what() << ")" << endl;
+            continue;
         }
+        // Check that first data line starts with block 0.
+        if(firstDataLine) {
+            if(blockID != 0) {
+                cout << "Error: The first block ID is not 0. Found " << blockID << endl;
+                return std::map<int, double>();  // Return empty map.
+            }
+            firstDataLine = false;
+        }
+        
+        if(!getline(ss, offsetToken, ',')) continue;
+        double offsetVal;
+        try {
+            offsetVal = stod(offsetToken);
+        } catch (std::exception &e) {
+            cout << "Error parsing offset in line: " << line << " (" << e.what() << ")" << endl;
+            continue;
+        }
+        offsets[blockID] = offsetVal;
+        // Ignore any extra columns.
     }
     file.close();
     return offsets;
@@ -67,7 +98,7 @@ int main(int argc, char* argv[]){
     // Prepend output directory to file name.
     TString outFilePath = Form("/volatile/hallc/nps/jpcrafts/ROOTfiles/Pi_0/%s", argv[4]);
     
-    // Load block-level offsets.
+    // Load block-level offsets from CSV.
     std::map<int, double> blockOffset = loadOffsets(csvFile);
     if(blockOffset.empty()){
         cout << "No offsets loaded. Exiting." << endl;
@@ -92,24 +123,29 @@ int main(int argc, char* argv[]){
     
     // Enable only the desired branches.
     tree->SetBranchStatus("*", 0);
+    // Global Event Number.
+    tree->SetBranchStatus("g.evnum", 1);
     // HMS-level branches.
     tree->SetBranchStatus("T.hms.hEDTM_tdcTimeRaw", 1);
     tree->SetBranchStatus("H.gtr.dp",               1);
     tree->SetBranchStatus("H.cal.etotnorm",         1);
     tree->SetBranchStatus("H.cer.npeSum",           1);
     tree->SetBranchStatus("H.gtr.th",               1);
+    tree->SetBranchStatus("H.gtr.ph",               1);
     // Cluster-level branches.
     tree->SetBranchStatus("NPS.cal.nclust",         1);
     tree->SetBranchStatus("NPS.cal.clusT",          1);
     tree->SetBranchStatus("NPS.cal.clusE",          1);
     tree->SetBranchStatus("NPS.cal.clusX",          1);
     tree->SetBranchStatus("NPS.cal.clusY",          1);
-    // And the fly branches.
+    // Fly-level branches.
     tree->SetBranchStatus("NPS.cal.fly.block_clusterID", 1);
     tree->SetBranchStatus("NPS.cal.fly.goodAdcTdcDiffTime", 1);
     tree->SetBranchStatus("NPS.cal.fly.e",          1);
     
-    // We'll create the new branch "NPS.cal.newClusT" in the output file.
+    // We'll create two new branches in the output file:
+    // "NPS.cal.newEWClusT" for energy-weighted cluster times,
+    // "NPS.cal.newClusT" for simple average cluster times.
     
     // Set branch addresses.
     // nclust and block_clusterID are stored as Double_t.
@@ -140,16 +176,13 @@ int main(int argc, char* argv[]){
     tree->SetBranchAddress("NPS.cal.clusY", clusY_raw);
     
     // Set branch addresses for HMS cuts.
-    Double_t edtmtdc;
-    Double_t hdelta;
-    Double_t hcaltot;
-    Double_t hcernpe;
-    Double_t gtrth;
+    Double_t edtmtdc, hdelta, hcaltot, hcernpe, gtrth, gtrph;
     tree->SetBranchAddress("T.hms.hEDTM_tdcTimeRaw", &edtmtdc);
     tree->SetBranchAddress("H.gtr.dp", &hdelta);
     tree->SetBranchAddress("H.cal.etotnorm", &hcaltot);
     tree->SetBranchAddress("H.cer.npeSum", &hcernpe);
     tree->SetBranchAddress("H.gtr.th", &gtrth);
+    tree->SetBranchAddress("H.gtr.ph", &gtrph);
     
     Long64_t nEntries = tree->GetEntries();
     cout << "Total entries in tree: " << nEntries << endl;
@@ -161,10 +194,14 @@ int main(int argc, char* argv[]){
     
     // Create output ROOT file.
     TFile *fout = TFile::Open(outFilePath.Data(), "RECREATE");
-    // Clone the tree structure (only selected branches) with zero entries.
+    // Clone the tree structure (with selected branches) with zero entries.
     TTree *newtree = tree->CloneTree(0);
     
-    // Create new branch for recalculated cluster times.
+    // Create new branches for recalculated cluster times.
+    // Energy-weighted cluster times.
+    std::vector<double> newEWClusT;
+    TBranch *bNewEWClusT = newtree->Branch("NPS.cal.newEWClusT", &newEWClusT);
+    // Simple average cluster times.
     std::vector<double> newClusT;
     TBranch *bNewClusT = newtree->Branch("NPS.cal.newClusT", &newClusT);
     
@@ -174,9 +211,14 @@ int main(int argc, char* argv[]){
         
         int nclust = static_cast<int>(nclust_d);
         
+        newEWClusT.clear();
+        newEWClusT.resize(nclust, 0.0);
         newClusT.clear();
         newClusT.resize(nclust, 0.0);
+        
+        // Vectors for summing values.
         vector<double> sumEnergy(nclust, 0.0);
+        vector<int> countBlocks(nclust, 0);
         
         // Loop over blocks.
         for (int ib = 0; ib < nBlocksMax; ib++){
@@ -186,25 +228,41 @@ int main(int argc, char* argv[]){
             if(blockOffset.find(ib) != blockOffset.end())
                 offset = blockOffset[ib];
             double correctedTime = block_t[ib] + offset;
-            newClusT[cid] += block_e[ib] * correctedTime;
+            // Energy-weighted accumulation.
+            newEWClusT[cid] += block_e[ib] * correctedTime;
             sumEnergy[cid] += block_e[ib];
+            // Simple average accumulation.
+            newClusT[cid] += correctedTime;
+            countBlocks[cid]++;
         }
         
+        // Finalize energy-weighted average.
         for (int i = 0; i < nclust; i++){
             if(sumEnergy[i] > 0)
-                newClusT[i] /= sumEnergy[i];
+                newEWClusT[i] /= sumEnergy[i];
+            else
+                newEWClusT[i] = 0;
+        }
+        // Finalize simple average.
+        for (int i = 0; i < nclust; i++){
+            if(countBlocks[i] > 0)
+                newClusT[i] /= countBlocks[i];
             else
                 newClusT[i] = 0;
         }
         
-        // Optionally, print first 10 events.
+        // Optionally, print first 10 events for debugging.
         if(ievt < 10) {
             cout << "Event " << ievt << ":\n";
             cout << "  Raw cluster times: ";
             for (int i = 0; i < nclust; i++){
                 cout << clusT_raw[i] << " ";
             }
-            cout << "\n  New cluster times: ";
+            cout << "\n  Energy-weighted new cluster times: ";
+            for (int i = 0; i < nclust; i++){
+                cout << newEWClusT[i] << " ";
+            }
+            cout << "\n  Simple average new cluster times: ";
             for (int i = 0; i < nclust; i++){
                 cout << newClusT[i] << " ";
             }
