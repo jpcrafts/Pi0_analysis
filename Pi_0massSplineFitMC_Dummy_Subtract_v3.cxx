@@ -1,11 +1,11 @@
     /*************************************************************
-     Pi_0massSplineFitMC_Dummy_Subtract_v2.cpp
+     Pi_0massSplineFitMC_Dummy_Subtract_v3.cpp
     – arithmetic in raw counts, global 1/realCharge scale at the end
     – dummy already normalised to counts / µC, then converted back to raw
     – builds Toy-MC-weighted π0-mass and Q² distributions (6-pad canvas)
 
     Usage:
-        ./Pi_0massSplineFitMC_Dummy_Subtract_v2 \
+        ./Pi_0massSplineFitMC_Dummy_Subtract_v3 \
             real.root out.pdf dummy.root realCharge_uC dummyCharge_uC
     *************************************************************/
 
@@ -21,6 +21,8 @@
     #include <TRandom3.h>
     #include <TSystem.h>
     #include <TLegend.h>
+    #include <TPaveText.h>
+    #include <TF1.h>
 
     #include <iostream>
     #include <vector>
@@ -107,7 +109,7 @@
 
     // ───────────────────────────────── quick Q² helper
     // --- constants for current kinematics --------------------
-    const double theta0_deg = 16.44;                  // HMS central angle (deg)
+    const double theta0_deg = 16.48;                  // HMS central angle (deg)
     const double theta0_rad = theta0_deg * M_PI/180.; // radians
     // ---------------------------------------------------------
     inline double compQ2(double E0,double Ep,double th,double ph)
@@ -136,8 +138,8 @@
         //----------------------------------------------------------------
         // constants (current kinematic = E₀ 10.538 GeV, ep₀ 4.637 GeV)
         //----------------------------------------------------------------
-        const double e0_nom   = 10.538;   // GeV (beam)
-        const double ep0_nom  =  4.637;   // GeV (central scattered electron)
+        const double e0_nom   = 10.54350201;   // GeV (beam)
+        const double ep0_nom  =  5.878;   // GeV (central scattered electron)
         const double bgLo=113, bgHi=142.5;
         const double sigLo=141.789, sigHi=171.289;
         const double shift=28.05;
@@ -149,6 +151,8 @@
         TH1F hSub_before("hSub_before", "", nBins, sigLo, sigHi);
         TH1F hSub_after("hSub_after", "", nBins, sigLo, sigHi);
         TH1F hD("hD", "", nBins, sigLo, sigHi);
+        // Histogram for missing mass (200 bins from 0 to 5 GeV/c^2 for debug)
+        TH1F hMissMass("hMissMass", "Missing Mass;M_{miss} [GeV/c^{2}];Counts", 200, 0, 5);
         {
             TFile fd(dumF.c_str(),"READ");
             if(!fd.IsZombie()){
@@ -358,6 +362,62 @@
                 keep.push_back(c);
             }
             if(keep.size()<2) continue;
+        
+            // --- Missing mass calculation for events with at least two good clusters ---
+            // Use the first two clusters in 'keep'
+            int i1 = keep[0], i2 = keep[1];
+        
+            // Constants
+            const double am = 0.938; // Proton mass [GeV/c^2]
+            // Beam electron four-vector: (E, px, py, pz)
+            double e0 = e0_nom;
+            double pe_px = 0, pe_py = 0, pe_pz = e0_nom;
+        
+            // Scattered electron
+            double ep = ep0_nom * (1.0 + dp / 100.0); // Scattered electron energy
+            // HMS angles: th (vertical), ph (horizontal), both in radians
+            // Assume small angles: px = p*sin(ph), py = p*sin(th), pz = p*cos(th)*cos(ph)
+            double peprime_p = std::sqrt(ep*ep - 0.000511*0.000511); // Neglect electron mass
+            double peprime_px = peprime_p * ph;
+            double peprime_py = peprime_p * th;
+            double peprime_pz = peprime_p * (1.0 - 0.5*(th*th + ph*ph)); // cos(th)*cos(ph) ≈ 1 - (th^2+ph^2)/2
+        
+            // Photon 1
+            double E1 = cE[i1];
+            double x1 = cX[i1], y1 = cY[i1];
+            double r1 = std::sqrt(x1*x1 + y1*y1 + DNPS*DNPS);
+            double p1x = E1 * x1 / r1;
+            double p1y = E1 * y1 / r1;
+            double p1z = E1 * DNPS / r1;
+        
+            // Photon 2
+            double E2 = cE[i2];
+            double x2 = cX[i2], y2 = cY[i2];
+            double r2 = std::sqrt(x2*x2 + y2*y2 + DNPS*DNPS);
+            double p2x = E2 * x2 / r2;
+            double p2y = E2 * y2 / r2;
+            double p2z = E2 * DNPS / r2;
+        
+            // Total outgoing energy and momentum
+            double E_out = ep + E1 + E2;
+            double px_out = peprime_px + p1x + p2x;
+            double py_out = peprime_py + p1y + p2y;
+            double pz_out = peprime_pz + p1z + p2z;
+        
+            // Initial state: beam electron + proton at rest
+            double E_in = e0 + am;
+            double px_in = 0.0;
+            double py_in = 0.0;
+            double pz_in = e0;
+        
+            // Missing mass squared
+            double mm2 = std::pow(E_in - E_out, 2)
+                       - std::pow(px_in - px_out, 2)
+                       - std::pow(py_in - py_out, 2)
+                       - std::pow(pz_in - pz_out, 2);
+        
+            double mm = (mm2 > 0) ? std::sqrt(mm2) : 0.0;
+            hMissMass.Fill(mm);
 
             for(size_t a=0;a<keep.size();++a)
                 for(size_t b=a+1;b<keep.size();++b){
@@ -430,6 +490,16 @@
         // global scale → counts/µC
         double sf=1.0/realQ;
         hMean ->Scale(sf);  hVar ->Scale(sf);
+// Set bin errors of hMean using variance from hVar (across ToyMC samples)
+        for (int b = 1; b <= hMean->GetNbinsX(); ++b) {
+            double var = hVar->GetBinContent(b);
+            double err = (Ntoys > 1) ? std::sqrt(var / (Ntoys - 1)) : 0.0;
+            hMean->SetBinError(b, err);
+            // Save missing mass histogram to file
+            TFile fMissMass("missing_mass.root", "RECREATE");
+            hMissMass.Write();
+            fMissMass.Close();
+        }
         hQmean->Scale(sf);  hQvar->Scale(sf);
 
         // error-band helpers
@@ -462,18 +532,48 @@
 
         // ToyMC/missing mass/Q² histograms are already normalized below (sf = 1.0/realQ)
 
-        TCanvas c("c", "", 1200, 3600);
-        c.Divide(1, 7);
-
+        TCanvas c("c", "", 1200, 4100); // Increased height for 8 pads
+        c.Divide(1, 8);
+        
         // Pad 1: hAll (charge-normalized raw yield)
         c.cd(1);
+        // Pad 1: Missing mass histogram (now at the bottom)
+        std::cout << "hMissMass entries: " << hMissMass.GetEntries() << std::endl;
+        std::cout << "hMissMass x-axis: [" << hMissMass.GetXaxis()->GetXmin() << ", " << hMissMass.GetXaxis()->GetXmax() << "]" << std::endl;
+        std::cout << "First bin content: " << hMissMass.GetBinContent(1) << std::endl;
+        std::cout << "Last bin content: " << hMissMass.GetBinContent(hMissMass.GetNbinsX()) << std::endl;
+        std::cout << "Underflow: " << hMissMass.GetBinContent(0) << std::endl;
+        std::cout << "Overflow: " << hMissMass.GetBinContent(hMissMass.GetNbinsX()+1) << std::endl;
+        if (hMissMass.GetEntries() == 0) {
+            // Test: fill with dummy value to check pad
+            hMissMass.Fill(0.5);
+            std::cout << "Filled hMissMass with test value 0.5" << std::endl;
+        }
+        hMissMass.SetLineColor(kRed+1);
+        hMissMass.SetLineWidth(2);
+        hMissMass.SetStats(1);
+        double maxMM = hMissMass.GetMaximum();
+        if (maxMM > 0) {
+            hMissMass.SetAxisRange(0, maxMM * 1.2, "Y");
+        }
+        hMissMass.Draw("HIST");
+        gPad->SetLogy(0); // Linear y-axis for missing mass, adjust as needed
+        gPad->Update();
+
+        // Pad 2: hAll (charge-normalized raw yield)
+        c.cd(2);
         hAll.SetLineColor(kBlack);
         hAll.SetTitle("All clusT[0] (charge normalized);clusT[0];Counts/\\muC");
         hAll.GetXaxis()->SetRangeUser(100, hAll.GetXaxis()->GetXmax());
         hAll.Draw("HIST");
 
+        // ... (existing pad drawing code for pads 2-7, now shifted up by 1) ...
+        
+            // Pad 8: Missing mass histogram
+            // (Pad 8 is now used for the last plot, not missing mass. This block is removed.)
+
         // Pad 2: hBG (background region, normalized) + smoothed fit (yF, normalized)
-        c.cd(2);
+        c.cd(3);
         hBG.SetLineColor(kBlack);
         hBG.SetMarkerStyle(20);
         hBG.SetMarkerSize(0.8);
@@ -490,7 +590,7 @@
         TGraph* grBGfit_shifted_norm = new TGraph(nBins, &vxs[0], &vys_shifted_norm[0]);
     
         // Pad 3: hSig (signal, normalized), shifted background from spline (normalized), and hSub (subtracted, normalized)
-        c.cd(3);
+        c.cd(4);
         hSig.SetLineColor(kRed);
         hSig.SetTitle("Signal, Background (fit, shifted), and Subtracted (all normalized);clusT[0];Counts/\\muC");
         hSig.Draw("HIST");
@@ -509,7 +609,7 @@
         grBGfit_shifted_norm->SetLineColor(kBlue);
 
         // Pad 7: Visualize dummy subtraction step
-        c.cd(7);
+        c.cd(8);
         hSub_before.SetLineColor(kBlack);
         hSub_before.SetTitle("Dummy Subtraction Step;clusT[0];Counts/raw");
         hSub_before.SetLineStyle(1);
@@ -534,22 +634,112 @@
         leg->Draw();
 
         // Pad 4: π0 mass mean (ToyMC)
-        c.cd(4);
+        c.cd(5);
         hMean->SetLineColor(kBlack);
         hMean->SetTitle("ToyMC π^{0} mass mean;M_{#gamma#gamma} (GeV);Counts/\\muC");
         hMean->Draw("HIST");
 
         // Pad 5: π0 mass mean + error band (ToyMC)
-        c.cd(5);
+        c.cd(6);
         double ymaxM = 1.2 * (hMean->GetMaximum() + hVar->GetMaximum());
+        double simcMax = 0.0;
+        
+        // Overlay simulation histogram from simc_yield_histos.root
+        TFile* fSimc = TFile::Open("simc_yield_histos.root");
+        TH1* hSimcToDraw = nullptr;
+        if (fSimc && !fSimc->IsZombie()) {
+            TH1* hSimc = dynamic_cast<TH1*>(fSimc->Get("h_all"));
+            if (hSimc) {
+                // Print binning and range info for debugging
+                std::cout << "hMean: bins=" << hMean->GetNbinsX()
+                          << ", xmin=" << hMean->GetXaxis()->GetXmin()
+                          << ", xmax=" << hMean->GetXaxis()->GetXmax() << std::endl;
+                std::cout << "h_all: bins=" << hSimc->GetNbinsX()
+                          << ", xmin=" << hSimc->GetXaxis()->GetXmin()
+                          << ", xmax=" << hSimc->GetXaxis()->GetXmax() << std::endl;
+                std::cout << "h_all: integral=" << hSimc->Integral() << std::endl;
+        
+                // Set axis range to match hMean/frame5
+                hSimc->GetXaxis()->SetRangeUser(0, 0.30);
+        
+                // If binning doesn't match, rebin to match hMean
+                if (hSimc->GetNbinsX() != hMean->GetNbinsX() ||
+                    hSimc->GetXaxis()->GetXmin() != hMean->GetXaxis()->GetXmin() ||
+                    hSimc->GetXaxis()->GetXmax() != hMean->GetXaxis()->GetXmax()) {
+                    std::cerr << "Warning: h_all binning does not match hMean. Attempting to rebin." << std::endl;
+                    int nBins = hMean->GetNbinsX();
+                    double xMin = hMean->GetXaxis()->GetXmin();
+                    double xMax = hMean->GetXaxis()->GetXmax();
+                    TH1* hSimcRebinned = (TH1*)hSimc->Rebin(nBins / hSimc->GetNbinsX(), "hSimcRebinned");
+                    hSimcRebinned->GetXaxis()->SetRangeUser(xMin, xMax);
+                    hSimcToDraw = hSimcRebinned;
+                } else {
+                    hSimcToDraw = hSimc;
+                }
+                if (hSimcToDraw) {
+                    hSimcToDraw->SetLineColor(kBlue);
+                    hSimcToDraw->SetLineWidth(1);
+                    hSimcToDraw->SetLineStyle(1); // solid
+                    simcMax = hSimcToDraw->GetMaximum();
+                }
+            } else {
+                std::cerr << "Could not find histogram 'h_all' in simc_yield_histos.root" << std::endl;
+            }
+        } else {
+            std::cerr << "Could not open simc_yield_histos.root" << std::endl;
+        }
+        
+        // Increase y-axis to accommodate both hMean/hVar and hSimc
+        if (simcMax > 0.0) {
+            double meanMax = hMean->GetMaximum() + hVar->GetMaximum();
+            ymaxM = 1.2 * std::max(meanMax, simcMax);
+        }
         if (ymaxM < 1e-6) ymaxM = 1e-6;
+        
         TH2F frame5("f5", ";M_{#gamma#gamma} (GeV);Counts/\\muC", 10, 0, 0.30, 10, 0, ymaxM);
         frame5.Draw("AXIS");
         gBandM->Draw("F SAME");
         hMean->Draw("HIST SAME");
+        if (hSimcToDraw) hSimcToDraw->Draw("HIST SAME");
+        
+        hMean->Fit("gaus", "SAME", "", 0.122, 0.142);
+        TF1* fitFunc = hMean->GetFunction("gaus");
+        if (fitFunc) fitFunc->SetLineWidth(1);
+        if (fitFunc) fitFunc->Draw("SAME");
+        // Custom stat box for fit and histogram
+        if (fitFunc) {
+            double chi2 = fitFunc->GetChisquare();
+            int ndf = fitFunc->GetNDF();
+            double mean = fitFunc->GetParameter(1);
+// Calculate and display the integral of the histogram hMean from 0.12 to 0.14
+int bin1 = hMean->FindBin(0.12);
+int bin2 = hMean->FindBin(0.14);
+double hist_integral = hMean->Integral(bin1, bin2);
+TPaveText* pint = new TPaveText(0.6, 0.65, 0.88, 0.7, "NDC");
+pint->SetFillColor(0);
+pint->SetTextAlign(12);
+pint->AddText(Form("Hist Int[0.12,0.14] = %.4f", hist_integral));
+pint->Draw("SAME");
+            double meanErr = fitFunc->GetParError(1);
+            double sigma = fitFunc->GetParameter(2);
+            double sigmaErr = fitFunc->GetParError(2);
+            double constant = fitFunc->GetParameter(0);
+            double constantErr = fitFunc->GetParError(0);
+
+            TPaveText* stats = new TPaveText(0.6, 0.7, 0.88, 0.88, "NDC");
+            stats->SetFillColor(0);
+            stats->SetTextAlign(12);
+            stats->AddText(Form("Entries = %.0f", hMean->GetEntries()));
+            stats->AddText(Form("Mean = %.4f #pm %.4f", mean, meanErr));
+            stats->AddText(Form("Sigma = %.4f #pm %.4f", sigma, sigmaErr));
+            stats->AddText(Form("Const = %.4f #pm %.4f", constant, constantErr));
+            stats->AddText(Form("#chi^{2}/NDF = %.2f / %d", chi2, ndf));
+            stats->Draw("SAME");
+        }
+        gPad->Update();
 
         // Pad 6: Q² mean + error band (ToyMC)
-        c.cd(6);
+        c.cd(7);
         double ymaxQ = 1.2 * (hQmean->GetMaximum() + hQvar->GetMaximum());
         if (ymaxQ < 1e-8) ymaxQ = 1e-8;
         TH2F frame6("f6", ";Q^{2} (GeV^{2});Counts/\\muC", 10, q2Lo, q2Hi, 10, 0, ymaxQ);

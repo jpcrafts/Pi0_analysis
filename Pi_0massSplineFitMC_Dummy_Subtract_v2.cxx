@@ -412,7 +412,7 @@ int main(int argc,char* argv[])
     // Explicitly construct and plot the final smoothed BG curve (yF)
     TGraph* grBGfinal = new TGraph(nBins, &vx[0], &yF[0]);
     grBGfinal->SetLineColor(kBlue);
-    grBGfinal->SetLineWidth(2);
+    grBGfinal->SetLineWidth(1);
     grBGfinal->Draw("L SAME");
     
     // Now explicitly overlay the spline curve:
