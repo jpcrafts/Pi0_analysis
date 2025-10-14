@@ -1,7 +1,4 @@
-// simc_mm_compare.cpp
-// Usage: ./simc_mm_compare simc_16_LH2_excl.txt simc_16_LH2_delta.txt simc_16_LH2_semi.txt output_base
-// Input files are looked for in /work/hallc/nps/bosted/Simcfiles/
-
+// Simc_import_take5.cxx
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -15,16 +12,21 @@
 #include <TCanvas.h>
 #include <TMath.h>
 
-// Constants (as in npa.f and SIMC)
-const double M_p     = 0.938272;   // Proton mass (GeV)
-const double m_e     = 0.000511;   // Electron mass (GeV)
-const double E_beam  = 10.540;     // Beam energy (GeV)
-const double NPS_dist = 407.0;     // NPS face distance from target (cm)
-const double theta0_deg = 16.48;   // HMS central angle (deg)
-const double p_central = 5.878;    // HMS central momentum (GeV)
+// ==== Constants for kin23 (update as needed for each kinematic) ====
+const double M_p        = 0.938272;   // Proton mass (GeV)
+const double m_e        = 0.000511;   // Electron mass (GeV)
+const double E_beam     = 10.539;     // Beam energy (GeV) for kin23
+const double NPS_dist   = 407.0;      // NPS face distance from target (cm)
+const double theta0_deg = 16.93;      // HMS central angle (deg) for kin23
+const double p_central  = 5.253;      // HMS central momentum (GeV) for kin23
+const double thp0sv_deg = 13.43;      // NPS central angle (deg) for kin23
 
-// Directory prefix for input files
-const std::string dir = "/work/hallc/nps/bosted/Simcfiles/";
+//const std::string dir = "/work/hallc/nps/bosted/Simcfiles/";
+const std::string dir = "/group/nps/jpcrafts/Pi_0/npa_test/SimcFiles/";
+
+const int NBINS = 200;
+const double XMIN = 0.0;
+const double XMAX = 5.0;
 
 struct Cluster {
     double x, y, e, t, c1, c2;
@@ -37,42 +39,47 @@ struct SIMCEvent {
 };
 
 double calc_missing_mass(const SIMCEvent& evt) {
-    // Incoming electron
     TLorentzVector pe_in(0, 0, E_beam, sqrt(E_beam*E_beam + m_e*m_e));
-    // Target proton at rest
     TLorentzVector p_p(0, 0, 0, M_p);
 
-    // Outgoing e- (scattered)
     double p_e = p_central * (1.0 + evt.dpe / 100.0);
-    double theta_e = (evt.dthe + theta0_deg) * TMath::DegToRad(); // central angle + delta
+    double theta_e = (evt.dthe + theta0_deg) * TMath::DegToRad();
     double phi_e = evt.dphie * TMath::DegToRad();
     double px_e = p_e * sin(theta_e) * cos(phi_e);
     double py_e = p_e * sin(theta_e) * sin(phi_e);
     double pz_e = p_e * cos(theta_e);
     TLorentzVector pe_out(px_e, py_e, pz_e, sqrt(p_e*p_e + m_e*m_e));
 
-    // Photons from clusters (NPS face at z = NPS_dist)
-    auto make_gamma = [](const Cluster& clus) -> TLorentzVector {
+    // NPS central angle in radians
+    double thp0_rad = thp0sv_deg * TMath::DegToRad();
+
+    // Function to rotate cluster vector by thp0sv about y-axis
+    auto make_gamma = [thp0_rad](const Cluster& clus) -> TLorentzVector {
         double x = clus.x;
         double y = clus.y;
         double z = NPS_dist;
-        double norm = sqrt(x*x + y*y + z*z);
-        double px = clus.e * x / norm;
-        double py = clus.e * y / norm;
-        double pz = clus.e * z / norm;
+        // Rotate (x, y, z) by thp0sv around y-axis
+        double x_rot =  x;                                      // untouched
+        double y_rot =  y * cos(thp0_rad) + z * sin(thp0_rad);  // +sin
+        double z_rot =  z * cos(thp0_rad) - y * sin(thp0_rad);  // −sin
+
+        double norm = sqrt(x_rot*x_rot + y_rot*y_rot + z_rot*z_rot);
+        double px = clus.e * x_rot / norm;
+        double py = clus.e * y_rot / norm;
+        double pz = clus.e * z_rot / norm;
         return TLorentzVector(px, py, pz, clus.e);
     };
     TLorentzVector g1 = make_gamma(evt.c1);
     TLorentzVector g2 = make_gamma(evt.c2);
 
-    // Missing mass calculation
     TLorentzVector mmvec = pe_in + p_p - pe_out - g1 - g2;
     double mm2 = mmvec.M2();
     return (mm2 > 0) ? sqrt(mm2) : 0.0;
 }
 
-// Reads all but last line block as events; last line is for normalization
-void read_simc_file(const std::string& fname, std::vector<double>& mm_list, double& normfac) {
+typedef std::pair<double, double> mmw_pair;
+
+void read_simc_file(const std::string& fname, std::vector<mmw_pair>& mm_list, double& normfac) {
     std::ifstream fin(fname);
     if (!fin) {
         std::cerr << "ERROR: Could not open file: " << fname << std::endl;
@@ -89,18 +96,14 @@ void read_simc_file(const std::string& fname, std::vector<double>& mm_list, doub
         std::cerr << "ERROR: File " << fname << " is empty or incomplete!\n";
         exit(2);
     }
-    // Last line for normalization (could be three lines at end; handle robustly)
     size_t n_lines = all_lines.size();
-    // Last event block is 3 lines before the last line; last line is normalization
     std::istringstream lastiss(all_lines.back());
     double w, scc, scm;
     lastiss >> w >> scc >> scm;
-    normfac = scm; // Fortran uses sigcm as normfac
+    normfac = scm;
 
-    // Remove the last line from processing
     n_lines--;
 
-    // Now process all remaining lines in blocks of 3
     size_t n_events = n_lines / 3;
     int nBad = 0;
     mm_list.reserve(n_events);
@@ -109,60 +112,46 @@ void read_simc_file(const std::string& fname, std::vector<double>& mm_list, doub
         std::istringstream iss2(all_lines[3*i+1]);
         std::istringstream iss3(all_lines[3*i+2]);
         SIMCEvent evt;
-        // Parse global event variables
         iss1 >> evt.weight >> evt.sigcc >> evt.sigcm >> evt.dpe >> evt.dphie >> evt.dthe
              >> evt.hztar >> evt.hdcx >> evt.hdcxp >> evt.hdcy >> evt.hdcyp
              >> evt.hcer >> evt.hcal >> evt.q2 >> evt.etotnorm >> evt.beta >> evt.ph_q;
-        // Parse cluster 1
         iss2 >> evt.c1.x >> evt.c1.y >> evt.c1.e >> evt.c1.t >> evt.c1.c1 >> evt.c1.c2;
-        // Parse cluster 2
         iss3 >> evt.c2.x >> evt.c2.y >> evt.c2.e >> evt.c2.t >> evt.c2.c1 >> evt.c2.c2;
 
-        // --- SIMC event selection logic (verbatim from npa.f) ---
-        // 1. Cluster distance cut (15cm)
+        // Event selection logic from npa.f:
         double dist = std::sqrt(
             std::pow(evt.c1.x - evt.c2.x, 2) +
             std::pow(evt.c1.y - evt.c2.y, 2)
         );
         if (dist < 15.0) continue;
-
-        // 2. Minimum photon energy cut (0.06 GeV)
         if (evt.c1.e < 0.06 || evt.c2.e < 0.06) continue;
-
-        // 3. Minimum cluster energy cut (0.2 GeV)
         if (evt.c1.e < 0.2  || evt.c2.e < 0.2)  continue;
-        // --------------------------------------------------------
 
         double mm = calc_missing_mass(evt);
-        if (mm > 0) mm_list.push_back(mm);
+        if (mm > 0) mm_list.emplace_back(mm, evt.weight);
     }
     std::cout << "[INFO] " << fname << ": " << n_events << " event blocks processed (" << nBad << " skipped)\n";
     std::cout << "        normfac = " << normfac << "\n";
-    std::cout << "        MM sample: ";
-    for (size_t i = 0; i < std::min(mm_list.size(), size_t(4)); ++i) std::cout << mm_list[i] << " ";
-    std::cout << (mm_list.size() > 4 ? "..." : "") << "\n";
+    if (!mm_list.empty()) {
+        std::cout << "        MM sample: ";
+        for (size_t i = 0; i < std::min(mm_list.size(), size_t(4)); ++i)
+            std::cout << mm_list[i].first << " ";
+        std::cout << (mm_list.size() > 4 ? "..." : "") << "\n";
+    }
 }
 
-void fill_and_save_hist(const std::vector<double>& mm_list, double normfac, const std::string& hist_name, const std::string& png_name) {
-    // Binning/range as before (0 to 2.5 GeV, 200 bins)
-    TH1F* hMM = new TH1F(hist_name.c_str(), (hist_name + ";Missing Mass [GeV];Counts").c_str(), 200, 0, 2.5);
-    for (const auto& mm : mm_list) {
-        hMM->Fill(mm, 1.0);
-    }
-    hMM->Scale(normfac); // Apply normalization
+TH1F* make_hist(const std::vector<mmw_pair>& mm_list, double normfac, const std::string& name) {
+    TH1F* h = new TH1F(name.c_str(), (name + ";Missing Mass [GeV];Counts").c_str(), NBINS, XMIN, XMAX);
+    for (const auto& pr : mm_list) h->Fill(pr.first, pr.second);
+    h->Scale(normfac / 1000.0); // normfac per mC → per µC
+    return h;
+}
 
-    // Diagnostics
-    std::cout << "Histogram: " << hist_name << "\n";
-    std::cout << "  normfac = " << normfac << "\n";
-    std::cout << "  Integral (after norm) = " << hMM->Integral() << "\n";
-    std::cout << "  Max bin content = " << hMM->GetMaximum() << "\n\n";
-
-    // Save as PNG
-    TCanvas* c1 = new TCanvas(("c_" + hist_name).c_str(), hist_name.c_str(), 900, 600);
-    hMM->Draw("HIST");
-    c1->SaveAs(png_name.c_str());
-    delete c1;
-    delete hMM;
+void save_hist_png(TH1F* h, const std::string& png_name) {
+    TCanvas* c = new TCanvas(("c_" + png_name).c_str(), png_name.c_str(), 900, 600);
+    h->Draw("HIST");
+    c->SaveAs(png_name.c_str());
+    delete c;
 }
 
 int main(int argc, char* argv[]) {
@@ -176,17 +165,34 @@ int main(int argc, char* argv[]) {
     std::string fname_semi  = dir + argv[3];
     std::string outbase     = argv[4];
 
-    std::vector<double> mm_excl, mm_delta, mm_semi;
+    std::vector<mmw_pair> mm_excl, mm_delta, mm_semi;
     double norm_excl = 1.0, norm_delta = 1.0, norm_semi = 1.0;
 
     read_simc_file(fname_excl,  mm_excl,  norm_excl);
     read_simc_file(fname_delta, mm_delta, norm_delta);
     read_simc_file(fname_semi,  mm_semi,  norm_semi);
 
-    fill_and_save_hist(mm_excl,  norm_excl,  "MM_exclusive",    outbase + "_exclusive.png");
-    fill_and_save_hist(mm_delta, norm_delta, "MM_delta",        outbase + "_delta.png");
-    fill_and_save_hist(mm_semi,  norm_semi,  "MM_semi",         outbase + "_semi.png");
+    TH1F* hExcl  = make_hist(mm_excl,  norm_excl,  "MM_exclusive");
+    TH1F* hDelta = make_hist(mm_delta, norm_delta, "MM_delta");
+    TH1F* hSemi  = make_hist(mm_semi,  norm_semi,  "MM_semi");
 
-    std::cout << "Done. Plots saved as " << outbase << "_exclusive.png, " << outbase << "_delta.png, " << outbase << "_semi.png\n";
+    save_hist_png(hExcl,  outbase + "_exclusive.png");
+    save_hist_png(hDelta, outbase + "_delta.png");
+    save_hist_png(hSemi,  outbase + "_semi.png");
+
+    TH1F* hTotal = new TH1F("MM_total", "Total Missing Mass;Missing Mass [GeV];Counts", NBINS, XMIN, XMAX);
+    hTotal->Add(hExcl);
+    hTotal->Add(hDelta);
+    hTotal->Add(hSemi);
+
+    save_hist_png(hTotal, outbase + "_total.png");
+
+    std::cout << "Done. Plots saved as "
+              << outbase << "_exclusive.png, "
+              << outbase << "_delta.png, "
+              << outbase << "_semi.png, "
+              << outbase << "_total.png\n";
+
+    delete hExcl; delete hDelta; delete hSemi; delete hTotal;
     return 0;
 }

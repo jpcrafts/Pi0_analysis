@@ -204,7 +204,7 @@ inline bool isGoodCluster(double e, double t, double x, double y)
 }
 
 // ───────────────────────────────── quick Q² helper
-const double theta0_deg = 17.01;                    // HMS central angle (deg)
+const double theta0_deg = 17.015;                    // HMS central angle (deg)
 const double theta0_rad = theta0_deg * M_PI / 180.; // radians
 inline double compQ2(double E0, double Ep, double th, double ph)
 {
@@ -214,7 +214,7 @@ inline double compQ2(double E0, double Ep, double th, double ph)
 }
 
 // —— NPS rotation (left-side ⇒ negative angle) ———————————
-constexpr double NPS_theta_deg = -14.36;                      // deg
+constexpr double NPS_theta_deg = -14.365;                      // deg
 constexpr double NPS_theta_rad = NPS_theta_deg * M_PI / 180.; // rad
 constexpr double NPS_dist = 307.0;                            // cm
 
@@ -223,7 +223,7 @@ inline void rotateNPS(double xDet, double yDet,
                       double zDet = NPS_dist)
 {
     // Passive rotation about +y by NPS_theta_deg (left side ⇒ angle is negative)
-    const double th = NPS_theta_rad; // = -20.15° in radians
+    const double th = NPS_theta_rad; // = -14.36° in radians
     const double c = std::cos(th), s = std::sin(th);
 
     // (xDet, yDet, zDet) treated as a vector in NPS frame → hall frame
@@ -298,7 +298,7 @@ int main(int argc, char *argv[])
     //----------------------------------------------------------------
     // constants (current kinematic = E₀ ~10.54 GeV)
     //----------------------------------------------------------------
-    const double e0_nom = 8.477512; // GeV (beam)
+    const double e0_nom = 8.457; // GeV (beam)
     const double ep0_nom = 4.042;      // GeV (central scattered electron)
     const double bgLo = 113, bgHi = 142.5;
     const double sigLo = 141.789, sigHi = 171.289;
