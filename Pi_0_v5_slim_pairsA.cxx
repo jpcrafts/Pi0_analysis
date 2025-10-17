@@ -26,6 +26,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <iomanip> // for std::fixed, std::setprecision
 
 #include "TFile.h"
 #include "TTree.h"
@@ -34,7 +35,14 @@
 #include "TLegend.h"
 #include "TString.h"
 #include "TDirectory.h"
-
+#include "TROOT.h"
+#include "TStyle.h"
+#include "TPaveText.h"
+#include "TBox.h"
+#include "TLegend.h"
+#include "TLorentzVector.h"
+#include "TMath.h"
+#include "TH2F.h"
 // Enable ALL-PAIRS Template-A with pairs→event scaling (matches full v5)
 #ifndef USE_PAIR_TEMPLATE
 #define USE_PAIR_TEMPLATE 1 // set to 0 to switch the multiplicity on
@@ -185,6 +193,42 @@ static inline bool computeMgg(double E1, double E2,
   return true;
 }
 
+static inline bool inPos(double t) { return inAny(t, posWins, NPOS); }
+static inline bool inNeg(double t) { return inAny(t, negWins, NNEG); }
+
+// Both photons in sidebands on the SAME side (pos–pos or neg–neg)
+static inline int whichPosIdx(double t)
+{
+  for (int k = 0; k < NPOS; ++k)
+    if (inWin(t, posWins[k]))
+      return k;
+  return -1;
+}
+static inline int whichNegIdx(double t)
+{
+  for (int k = 0; k < NNEG; ++k)
+    if (inWin(t, negWins[k]))
+      return k;
+  return -1;
+}
+
+static inline bool isAA_diag(double ti, double tj)
+{
+  const int ip = whichPosIdx(ti), jp = whichPosIdx(tj);
+  if (ip >= 0 && jp >= 0)
+    return (ip == jp); // upper-right: same positive stripe
+  const int in = whichNegIdx(ti), jn = whichNegIdx(tj);
+  if (in >= 0 && jn >= 0)
+    return (in == jn); // lower-left: same negative stripe
+  return false;
+}
+
+// Photons in sidebands on OPPOSITE sides (pos–neg or neg–pos)
+static inline bool isAA_pure(double ti, double tj)
+{
+  return ((inPos(ti) && inNeg(tj)) || (inNeg(ti) && inPos(tj)));
+}
+
 // ─────────────────────── histogram pack ───────────────────────
 struct Pack
 {
@@ -209,6 +253,21 @@ struct Pack
   TH1F hMM_CC_evt_UP, hMM_CC_evt_DN; // per-event CC UP/DN (dummy-only fills)
   TH1F hMG_CC_evt_UP, hMG_CC_evt_DN; // per-event Mgg CC UP/DN (dummy-only)
 
+  // MM (pairs)
+  TH1F hMM_AD;               // AA diagonal (pos–pos + neg–neg)
+  TH1F hMM_AP;               // AA pure/opposite (pos–neg + neg–pos)
+  TH1F hMM_AD_UP, hMM_AD_DN; // dummy splits
+  TH1F hMM_AP_UP, hMM_AP_DN;
+
+  // Mγγ (pairs)
+  TH1F hMG_AD, hMG_AP;
+  TH1F hMG_AD_UP, hMG_AD_DN;
+  TH1F hMG_AP_UP, hMG_AP_DN;
+
+  // 2D timing QA (pairs): t_i vs t_j
+  TH2F hTT_pairs;
+  TH2F hTT_pairs_UP, hTT_pairs_DN; // for optional dummy subtraction
+
   Pack(const char *tag)
       : hMM_CC(TString::Format("hMM_CC_%s", tag), "MM CC;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_V(TString::Format("hMM_V_%s", tag), "MM V;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_H(TString::Format("hMM_H_%s", tag), "MM H;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AA(TString::Format("hMM_AA_%s", tag), "MM AA;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMG_CC(TString::Format("hMG_CC_%s", tag), "M_{#gamma#gamma} CC;M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_V(TString::Format("hMG_V_%s", tag), "M_{#gamma#gamma} V;M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_H(TString::Format("hMG_H_%s", tag), "M_{#gamma#gamma} H;M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_AA(TString::Format("hMG_AA_%s", tag), "M_{#gamma#gamma} AA;M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMM_CC_afterDummy(TString::Format("hMM_CC_afterDummy_%s", tag),
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "MM CC (after dummy);M_{X} (GeV);Counts", nMM, mmLo, mmHi),
@@ -223,6 +282,12 @@ struct Pack
 
         ,
         hMM_Best(TString::Format("hMM_Best_%s", tag), "MM B_{est};M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_Sub(TString::Format("hMM_Sub_%s", tag), "MM SUB;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMG_Best(TString::Format("hMG_Best_%s", tag), "Mgg B_{est};M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_Sub(TString::Format("hMG_Sub_%s", tag), "Mgg SUB;M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi)
+
+        ,
+        hMM_AD(Form("hMM_AD_%s", tag), "MM AA (diag);M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AP(Form("hMM_AP_%s", tag), "MM AA (pure);M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AD_UP(Form("hMM_AD_UP_%s", tag), "MM AA (diag) UP;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AD_DN(Form("hMM_AD_DN_%s", tag), "MM AA (diag) DN;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AP_UP(Form("hMM_AP_UP_%s", tag), "MM AA (pure) UP;M_{X} (GeV);Counts", nMM, mmLo, mmHi), hMM_AP_DN(Form("hMM_AP_DN_%s", tag), "MM AA (pure) DN;M_{X} (GeV);Counts", nMM, mmLo, mmHi)
+
+        ,
+        hMG_AD(Form("hMG_AD_%s", tag), "m_{#gamma#gamma} AA (diag);m_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_AP(Form("hMG_AP_%s", tag), "m_{#gamma#gamma} AA (pure);m_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi), hMG_AD_UP(Form("hMG_AD_UP_%s", tag), "m_{#gamma#gamma} AA (diag) UP;...", nMG, mgLo, mgHi), hMG_AD_DN(Form("hMG_AD_DN_%s", tag), "m_{#gamma#gamma} AA (diag) DN;...", nMG, mgLo, mgHi), hMG_AP_UP(Form("hMG_AP_UP_%s", tag), "m_{#gamma#gamma} AA (pure) UP;...", nMG, mgLo, mgHi), hMG_AP_DN(Form("hMG_AP_DN_%s", tag), "m_{#gamma#gamma} AA (pure) DN;...", nMG, mgLo, mgHi), hTT_pairs(Form("hTT_pairs_%s", tag), "t_{i} vs t_{j};t_{i} (ns);t_{j} (ns)", 200, 140, 160, 200, 140, 160), hTT_pairs_UP(Form("hTT_pairs_UP_%s", tag), "t_{i} vs t_{j} (UP)", 200, 140, 160, 200, 140, 160), hTT_pairs_DN(Form("hTT_pairs_DN_%s", tag), "t_{i} vs t_{j} (DN)", 200, 140, 160, 200, 140, 160)
   {
     auto s2 = [&](TH1F &h)
     { h.Sumw2(); };
@@ -351,6 +416,12 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
 
         const double yavg = 0.5 * (cY[a] + cY[b]); // sign for UP/DN split
 
+        O.hTT_pairs.Fill(ti, tj);
+        if (isDummy)
+        {
+          (yavg >= 0 ? O.hTT_pairs_DN : O.hTT_pairs_UP).Fill(ti, tj);
+        }
+
         if (isCC(ti, tj))
         {
           O.hMM_CC.Fill(mm);
@@ -398,16 +469,28 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
               (yavg >= 0 ? O.hMG_H_DN : O.hMG_H_UP).Fill(mg);
           }
         }
-        else if (isAA(ti, tj))
+        else if (isAA_diag(ti, tj))
         {
-          O.hMM_AA.Fill(mm);
+          O.hMM_AD.Fill(mm);
           if (mg > 0)
-            O.hMG_AA.Fill(mg);
+            O.hMG_AD.Fill(mg);
           if (isDummy)
           {
-            (yavg >= 0 ? O.hMM_AA_DN : O.hMM_AA_UP).Fill(mm);
+            (yavg >= 0 ? O.hMM_AD_DN : O.hMM_AD_UP).Fill(mm);
             if (mg > 0)
-              (yavg >= 0 ? O.hMG_AA_DN : O.hMG_AA_UP).Fill(mg);
+              (yavg >= 0 ? O.hMG_AD_DN : O.hMG_AD_UP).Fill(mg);
+          }
+        }
+        else if (isAA_pure(ti, tj))
+        {
+          O.hMM_AP.Fill(mm);
+          if (mg > 0)
+            O.hMG_AP.Fill(mg);
+          if (isDummy)
+          {
+            (yavg >= 0 ? O.hMM_AP_DN : O.hMM_AP_UP).Fill(mm);
+            if (mg > 0)
+              (yavg >= 0 ? O.hMG_AP_DN : O.hMG_AP_UP).Fill(mg);
           }
         }
       }
@@ -469,9 +552,19 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   TH1F hH_mm = D.hMM_H;
   TH1F hHm = norm_dummy(M.hMM_H_UP, M.hMM_H_DN);
   hH_mm.Add(&hHm, -1.0);
-  TH1F hAA_mm = D.hMM_AA;
-  TH1F hAAm = norm_dummy(M.hMM_AA_UP, M.hMM_AA_DN);
-  hAA_mm.Add(&hAAm, -1.0);
+  TH1F hAD_mm = D.hMM_AD;
+  {
+    TH1F tmp = norm_dummy(M.hMM_AD_UP, M.hMM_AD_DN);
+    hAD_mm.Add(&tmp, -1.0);
+  }
+  TH1F hAP_mm = D.hMM_AP;
+  {
+    TH1F tmp = norm_dummy(M.hMM_AP_UP, M.hMM_AP_DN);
+    hAP_mm.Add(&tmp, -1.0);
+  }
+  // Rebuild combined AA for QA output/writes:
+  TH1F hAA_mm = hAD_mm;
+  hAA_mm.Add(&hAP_mm, +1.0);
 
   // Mgg categories after dummy
   TH1F hCC_mg = D.hMG_CC;
@@ -483,28 +576,61 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   TH1F hH_mg = D.hMG_H;
   TH1F hHg = norm_dummy(M.hMG_H_UP, M.hMG_H_DN);
   hH_mg.Add(&hHg, -1.0);
-  TH1F hAA_mg = D.hMG_AA;
-  TH1F hAAg = norm_dummy(M.hMG_AA_UP, M.hMG_AA_DN);
-  hAA_mg.Add(&hAAg, -1.0);
+  TH1F hAD_mg = D.hMG_AD;
+  {
+    TH1F tmp = norm_dummy(M.hMG_AD_UP, M.hMG_AD_DN);
+    hAD_mg.Add(&tmp, -1.0);
+  }
+  TH1F hAP_mg = D.hMG_AP;
+  {
+    TH1F tmp = norm_dummy(M.hMG_AP_UP, M.hMG_AP_DN);
+    hAP_mg.Add(&tmp, -1.0);
+  }
+  // Rebuild combined AA for QA output/writes:
+  TH1F hAA_mg = hAD_mg;
+  hAA_mg.Add(&hAP_mg, +1.0);
 
-  // Keep a copy for the final overlays
-  OUT.hMM_CC_afterDummy.Reset("ICESM");
-  OUT.hMM_CC_afterDummy.Add(&hCC_mm, 1.0);
-
-  OUT.hMG_CC_afterDummy.Reset("ICESM");
-  OUT.hMG_CC_afterDummy.Add(&hCC_mg, 1.0);
-
-  // Coefficients (geometric Option A)
-  double Wacc = 0.0;
+  // NEW: area-aware coefficient for AD (diag-squares) + AP (full off-diagonal)
+  double Wpos = 0.0, Wneg = 0.0, sumSqPos = 0.0, sumSqNeg = 0.0;
   for (int i = 0; i < NPOS; ++i)
-    Wacc += (posWins[i].hi - posWins[i].lo);
+  {
+    const double w = posWins[i].hi - posWins[i].lo;
+    Wpos += w;
+    sumSqPos += w * w;
+  }
   for (int i = 0; i < NNEG; ++i)
-    Wacc += (negWins[i].hi - negWins[i].lo);
-  const double Wsig = (C_HI - C_LO);
-  const double ACC = Wsig * Wsig;
-  const double aV = (Wacc > 0 ? Wsig / Wacc : 0.0);
-  const double aH = (Wacc > 0 ? Wsig / Wacc : 0.0);
-  const double aA = (Wacc > 0 ? ACC / (Wacc * Wacc) : 0.0);
+  {
+    const double w = negWins[i].hi - negWins[i].lo;
+    Wneg += w;
+    sumSqNeg += w * w;
+  }
+  // Areas in (ti,tj) plane:
+  const double A_AD = sumSqPos + sumSqNeg;                 // diag “same-stripe” squares (LL and UR only)
+  const double A_AP = 2.0 * Wpos * Wneg;                   // full off-diagonal corners (UL + LR)
+                                                           // Central (CC) width and area
+  const double Wsig = (C_LO < C_HI) ? (C_HI - C_LO) : 0.0; // ~2 ns
+  const double ACC = Wsig * Wsig;                          // CC box area
+
+  // Stripe scale factors for Template A
+  // V and H stripes each cover: Wsig × (Wpos + Wneg)  → aV = aH = ACC / [Wsig*(Wpos+Wneg)] = Wsig/(Wpos+Wneg)
+  const double aV = (Wpos + Wneg) > 0.0 ? (Wsig / (Wpos + Wneg)) : 0.0;
+  const double aH = aV;
+
+  // AA is split into: AD (diag narrow squares only) and AP (opposite-side big corners).
+  // We are *using only* AD + AP (not the same-side off-diagonal squares), so normalize to (A_AD + A_AP).
+  const double aA = (A_AD + A_AP) > 0.0 ? (ACC / (A_AD + A_AP)) : 0.0;
+
+  // Use the same coefficient on both pieces so that
+  //   aAD*AD + aAP*AP  ≡  aA*(AD+AP)  (identical to classic AA when recombined).
+  const double aA_split = aA;
+
+  // (optional) debug print
+  std::cout << std::fixed << std::setprecision(3)
+            << "[geom] Wsig=" << Wsig
+            << "  Wpos=" << Wpos << "  Wneg=" << Wneg
+            << "  A_AD=" << A_AD << "  A_AP=" << A_AP
+            << "  aV=" << aV << "  aH=" << aH
+            << "  aA_total=" << aA << "  aA_split=" << aA_split << "\n";
 
 #if USE_PAIR_TEMPLATE
   // ── Build B_est in ALL-PAIRS space and rescale to per-event CC (Template A) ──
@@ -512,13 +638,15 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   hMM_Best_pairs.Reset();
   hMM_Best_pairs.Add(&hV_mm, +aV);
   hMM_Best_pairs.Add(&hH_mm, +aH);
-  hMM_Best_pairs.Add(&hAA_mm, -aA);
+  hMM_Best_pairs.Add(&hAD_mm, -aA_split);
+  hMM_Best_pairs.Add(&hAP_mm, -aA_split);
 
   TH1F hMG_Best_pairs("hMG_Best_pairs", "Mgg B_{est} (ALL pairs);M_{#gamma#gamma} (GeV);Counts", nMG, mgLo, mgHi);
   hMG_Best_pairs.Reset();
   hMG_Best_pairs.Add(&hV_mg, +aV);
   hMG_Best_pairs.Add(&hH_mg, +aH);
-  hMG_Best_pairs.Add(&hAA_mg, -aA);
+  hMG_Best_pairs.Add(&hAD_mg, -aA_split);
+  hMG_Best_pairs.Add(&hAP_mg, -aA_split);
 
   // Per-event CC after dummy (for scaling target)
   TH1F hCC_mm_evt = D.hMM_CC_evt;
@@ -527,6 +655,18 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   TH1F hCC_mg_evt = D.hMG_CC_evt;
   TH1F hCCg_evt = norm_dummy(M.hMG_CC_evt_UP, M.hMG_CC_evt_DN);
   hCC_mg_evt.Add(&hCCg_evt, -1.0);
+
+  std::cerr << "[doDummyThenA] per-event CC built: "
+            << "MM=" << hCC_mm_evt.Integral()
+            << "  Mgg=" << hCC_mg_evt.Integral() << "\n";
+
+  OUT.hMM_CC_afterDummy.Reset("ICESM");
+  OUT.hMM_CC_afterDummy.Add(&hCC_mm_evt, 1.0);
+
+  OUT.hMG_CC_afterDummy.Reset("ICESM");
+  OUT.hMG_CC_afterDummy.Add(&hCC_mg_evt, 1.0);
+
+  std::cerr << "[doDummyThenA] overlays seeded from per-event CC\n";
 
   // pairs→event scales (after dummy)
   const double cc_evt_mm = hCC_mm_evt.Integral();
@@ -547,12 +687,20 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   OUT.hMG_Best.Scale(k_pairs2event_mg);
   OUT.hMG_Sub = hCC_mg_evt;
   OUT.hMG_Sub.Add(&OUT.hMG_Best, -1.0);
+
+  std::cerr << "[doDummyThenA] B_est/Sub done: "
+            << "MM_Best=" << OUT.hMM_Best.Integral()
+            << "  MM_Sub=" << OUT.hMM_Sub.Integral()
+            << "  Mgg_Best=" << OUT.hMG_Best.Integral()
+            << "  Mgg_Sub=" << OUT.hMG_Sub.Integral() << "\n";
+
 #else
   // MM A-method on after-dummy categories (event-space analogue)
   OUT.hMM_Best.Reset();
   OUT.hMM_Best.Add(&hV_mm, +aV);
   OUT.hMM_Best.Add(&hH_mm, +aH);
-  OUT.hMM_Best.Add(&hAA_mm, -aA);
+  OUT.hMM_Best.Add(&hAD_mm, -aA_split);
+  OUT.hMM_Best.Add(&hAP_mm, -aA_split);
 
   OUT.hMM_Sub.Reset();
   OUT.hMM_Sub.Add(&hCC_mm, 1.0);
@@ -562,7 +710,8 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
   OUT.hMG_Best.Reset();
   OUT.hMG_Best.Add(&hV_mg, +aV);
   OUT.hMG_Best.Add(&hH_mg, +aH);
-  OUT.hMG_Best.Add(&hAA_mg, -aA);
+  OUT.hMG_Best.Add(&hAD_mg, -aA_split);
+  OUT.hMG_Best.Add(&hAP_mg, -aA_split);
 
   OUT.hMG_Sub.Reset();
   OUT.hMG_Sub.Add(&hCC_mg, 1.0);
@@ -594,6 +743,7 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
 // ─────────────────────────────────── main ───────────────────────────────────
 int main(int argc, char **argv)
 {
+  gROOT->SetBatch(kTRUE);
   if (argc < 4)
   {
     std::cerr << "Usage: " << argv[0] << " <data.root> <dummy.root> <out.root> [Qdata] [Qdummy]\n";
@@ -733,9 +883,113 @@ int main(int argc, char **argv)
     leg->AddEntry(&OUT.hMG_Best, "Mgg B_{est} (after dummy)", "l");
     leg->AddEntry(&OUT.hMG_Sub, "Mgg Final SUB", "l");
     leg->Draw();
+    std::cerr << "[doDummyThenA] wrote MM_overlay_final\n";
+
     c.Write("Mgg_overlay_final");
   }
 
+  // ───────────── 2D timing map with region boxes (DATA pairs; CC not subtracted) ─────────────
+  {
+    // Use DATA pairs for the density map (un-subtracted CC as requested)
+    TH2F hTT = D.hTT_pairs; // if you prefer after-dummy, see commented block below
+
+    // Optional: do after-dummy in 2D (uncomment to enable)
+    // TH2F hTTdum = M.hTT_pairs_UP; hTTdum.Scale(kUP);
+    // { TH2F tmp = M.hTT_pairs_DN; tmp.Scale(kDN); hTTdum.Add(&tmp); }
+    // if (Qdum > 0) hTTdum.Scale(Qdata / Qdum);
+    // hTT.Add(&hTTdum, -1.0);
+
+    TCanvas cTT("cTT", "Timing map with regions", 1000, 900);
+    gPad->SetRightMargin(0.12);
+    gPad->SetLogz();
+    hTT.SetTitle("Pairs timing map; t_{i} (ns); t_{j} (ns)");
+    hTT.Draw("COLZ");
+
+    // Helpers to collect total pos/neg spans for AP “big corners”
+    double pos_lo = +1e9, pos_hi = -1e9, neg_lo = +1e9, neg_hi = -1e9;
+    for (int i = 0; i < NPOS; ++i)
+    {
+      pos_lo = std::min(pos_lo, posWins[i].lo);
+      pos_hi = std::max(pos_hi, posWins[i].hi);
+    }
+    for (int i = 0; i < NNEG; ++i)
+    {
+      neg_lo = std::min(neg_lo, negWins[i].lo);
+      neg_hi = std::max(neg_hi, negWins[i].hi);
+    }
+
+    // Style helper
+    auto makeBox = [](double x1, double y1, double x2, double y2, Color_t col, int lw = 3) -> TBox *
+    {
+      auto b = new TBox(x1, y1, x2, y2);
+      b->SetFillStyle(0);
+      b->SetLineColor(col);
+      b->SetLineWidth(lw);
+      return b;
+    };
+
+    // CC box
+    auto bCC = makeBox(C_LO, C_LO, C_HI, C_HI, kBlack, 4);
+    bCC->Draw("same");
+
+    // Vertical (V): ti in CC, tj in each sideband stripe
+    std::vector<TBox *> vBoxes;
+    for (int i = 0; i < NPOS; ++i)
+    {
+      vBoxes.push_back(makeBox(C_LO, posWins[i].lo, C_HI, posWins[i].hi, kBlue));
+    }
+    for (int i = 0; i < NNEG; ++i)
+    {
+      vBoxes.push_back(makeBox(C_LO, negWins[i].lo, C_HI, negWins[i].hi, kBlue));
+    }
+    for (auto *b : vBoxes)
+      b->Draw("same");
+
+    // Horizontal (H): tj in CC, ti in each sideband stripe
+    std::vector<TBox *> hBoxes;
+    for (int i = 0; i < NPOS; ++i)
+    {
+      hBoxes.push_back(makeBox(posWins[i].lo, C_LO, posWins[i].hi, C_HI, kGreen + 2));
+    }
+    for (int i = 0; i < NNEG; ++i)
+    {
+      hBoxes.push_back(makeBox(negWins[i].lo, C_LO, negWins[i].hi, C_HI, kGreen + 2));
+    }
+    for (auto *b : hBoxes)
+      b->Draw("same");
+
+    // AD (“diagonal squares”): same stripe on same side (LL and UR), EXACT squares only
+    std::vector<TBox *> adBoxes;
+    for (int i = 0; i < NPOS; ++i)
+    {
+      adBoxes.push_back(makeBox(posWins[i].lo, posWins[i].lo, posWins[i].hi, posWins[i].hi, kMagenta + 1));
+    }
+    for (int i = 0; i < NNEG; ++i)
+    {
+      adBoxes.push_back(makeBox(negWins[i].lo, negWins[i].lo, negWins[i].hi, negWins[i].hi, kMagenta + 1));
+    }
+    for (auto *b : adBoxes)
+      b->Draw("same");
+
+    // AP (“pure A”): big off-diagonal corners (UL and LR)
+    auto bAP_UL = makeBox(neg_lo, pos_lo, neg_hi, pos_hi, kOrange + 1);
+    auto bAP_LR = makeBox(pos_lo, neg_lo, pos_hi, neg_hi, kOrange + 1);
+    bAP_UL->Draw("same");
+    bAP_LR->Draw("same");
+
+    // Legend
+    auto leg = new TLegend(0.13, 0.78, 0.45, 0.93);
+    leg->SetBorderSize(0);
+    leg->SetFillStyle(0);
+    leg->AddEntry(bCC, "CC window", "l");
+    leg->AddEntry(vBoxes.front(), "Vertical (V)", "l");
+    leg->AddEntry(hBoxes.front(), "Horizontal (H)", "l");
+    leg->AddEntry(adBoxes.front(), "Diag A (AD)", "l");
+    leg->AddEntry(bAP_UL, "Pure A (AP)", "l");
+    leg->Draw();
+
+    cTT.Write("TT_regions_overlay");
+  }
   fout.Close();
   std::cout << "Wrote " << outF << "\n";
   return 0;

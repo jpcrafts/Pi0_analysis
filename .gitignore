@@ -1,6 +1,7 @@
 # Ignore object files and executables
 *.o
 *.exe
+*.f
 
 # Ignore the 'blocktimes' directory & ROOTfiles symlink
 blocktimes/
@@ -8,7 +9,7 @@ ROOTfiles
 Plots
 VolatileROOTfiles
 old_scripts/
-
+.vscode.bak
 # Ignore backup or temporary files
 *~
 .*.swp
@@ -25,5 +26,9 @@ grep_rvardef_variables_output.txt
 *.dat
 *.csv
 check_evnum*
-
-
+PeterB.C
+npa_test/*
+npa_test/
+npa_test
+Avnish_exclusive.py
+exclusive_pi0.ipynb
