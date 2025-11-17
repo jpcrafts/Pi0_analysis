@@ -52,15 +52,14 @@
 #include "TLorentzVector.h"
 #include "TMath.h"
 #include "TH2F.h"
-#include "TParameter.h"
-#include "TVectorD.h"
-#include "TUUID.h"
-#include "TH2D.h"
-
 // Enable ALL-PAIRS Template-A with pairs→event scaling (matches full v5)
 #ifndef USE_PAIR_TEMPLATE
 #define USE_PAIR_TEMPLATE 1 // set to 0 to switch the multiplicity on
 #endif
+
+// --- Diagnostics (file-scope, stack-allocated) ---
+#include "TH2D.h"
+#include "TFile.h"
 
 // Δm_eff = (m_inv - m_pi0) after taper  vs  corr_fac actually used
 static TH2D hDeltaM_vs_CorrFac("hDeltaM_vs_CorrFac",
@@ -104,7 +103,8 @@ static constexpr double mgLo = 0.05, mgHi = 0.2;
 static constexpr double kUP_v5 = 8.467; // upstream
 static constexpr double kDN_v5 = 4.256; // downstream
 
-// ---- mγγ window (placed early so MR_compute_config_hash() can see it) ----
+// ─────────────────────────── helpers ───────────────────────────
+
 struct MggWindow
 {
     double mu = 0.135, sigma = 0.006, lo = 0.129, hi = 0.141, nsig = 2.0;
@@ -112,193 +112,6 @@ struct MggWindow
     int order = 2, rebin = 1;
     bool ok = false;
 };
-
-// Define g_MGW here so it's in scope for MR_compute_config_hash()
-static MggWindow g_MGW;
-
-// ===================== Map→Reduce support (schema + accumulator) =====================
-struct BinSchema
-{
-    std::vector<std::string> axisNames;     // e.g., {"MxCorr","Mgg"}
-    std::vector<std::vector<double>> edges; // edges per axis
-    std::string id;                         // stable hash
-    bool valid() const { return !axisNames.empty() && axisNames.size() == edges.size(); }
-};
-
-// FNV-1a hash for edge arrays
-static std::string MR_hashEdges(const std::vector<std::vector<double>> &E)
-{
-    uint64_t h = 1469598103934665603ull;
-    auto mix = [&](const void *p, size_t n)
-    {
-        const unsigned char *s = (const unsigned char *)p;
-        for (size_t i = 0; i < n; i++)
-        {
-            h ^= s[i];
-            h *= 1099511628211ull;
-        }
-    };
-    for (auto &v : E)
-    {
-        if (!v.empty())
-            mix(v.data(), v.size() * sizeof(double));
-    }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
-    return std::string(buf);
-}
-
-// Load schema from a ROOT file at BinEdges/{AxisName}
-static BinSchema MR_loadBinSchema(const std::string &path)
-{
-    BinSchema s;
-    if (path.empty())
-        return s;
-    TFile f(path.c_str(), "READ");
-    if (!f.IsOpen())
-    {
-        std::cerr << "[binschema] cannot open " << path << "\n";
-        return s;
-    }
-    TDirectory *d = (TDirectory *)f.Get("BinEdges");
-    if (!d)
-    {
-        std::cerr << "[binschema] no BinEdges/ in " << path << "\n";
-        return s;
-    }
-    f.cd("BinEdges");
-
-    // NOTE: start with MxCorr and Mgg; extend later with Q2,xB,z,pT,phi,tprime
-    std::vector<std::string> want = {"MxCorr", "Mgg"};
-    for (auto &nm : want)
-    {
-        if (auto *v = (TVectorD *)gDirectory->Get(nm.c_str()))
-        {
-            s.axisNames.push_back(nm);
-            s.edges.emplace_back(v->GetNoElements());
-            for (int i = 0; i < v->GetNoElements(); ++i)
-                s.edges.back()[i] = (*v)[i];
-        }
-    }
-    f.cd();
-    if (!s.valid())
-    {
-        std::cerr << "[binschema] invalid/empty " << path << "\n";
-        return s;
-    }
-    s.id = MR_hashEdges(s.edges);
-    std::cerr << "[binschema] axes=";
-    for (size_t i = 0; i < s.axisNames.size(); ++i)
-        std::cerr << s.axisNames[i] << (i + 1 < s.axisNames.size() ? ", " : "");
-    std::cerr << "  id=" << s.id << "\n";
-    return s;
-};
-
-// Our 5 categories (match your code): CC, V, H, AD (=AA_diag), AP (=AA_pure)
-struct MR_BinRow
-{
-    // tallies before algebra (counts)
-    double CC_data = 0, V_data = 0, H_data = 0, AD_data = 0, AP_data = 0;
-    double CC_up = 0, V_up = 0, H_up = 0, AD_up = 0, AP_up = 0;
-    double CC_dn = 0, V_dn = 0, H_dn = 0, AD_dn = 0, AP_dn = 0;
-    // final algebra results
-    double Sum = 0, Sum2 = 0;
-};
-
-struct MR_Accumulator
-{
-    BinSchema schema;
-    std::vector<MR_BinRow> bins;
-
-    void init(const BinSchema &s)
-    {
-        schema = s;
-        int nTot = 1;
-        for (auto &e : s.edges)
-            nTot *= std::max(0, (int)e.size() - 1);
-        bins.assign(std::max(0, nTot), MR_BinRow{});
-    }
-
-    // locate bin for up to 2 axes (MxCorr, Mgg); extend if/when you add more
-    int locate(double ax0, double ax1) const
-    {
-        if (!schema.valid())
-            return -1;
-        int ia = -1, ib = -1;
-        for (size_t i = 0; i < schema.axisNames.size(); ++i)
-        {
-            auto &nm = schema.axisNames[i];
-            auto &e = schema.edges[i];
-            if (nm == "MxCorr")
-            {
-                ia = (int)(std::upper_bound(e.begin(), e.end(), ax0) - e.begin()) - 1;
-                if (ia < 0 || ia + 1 >= (int)e.size())
-                    return -1;
-            }
-            else if (nm == "Mgg")
-            {
-                ib = (int)(std::upper_bound(e.begin(), e.end(), ax1) - e.begin()) - 1;
-                if (ib < 0 || ib + 1 >= (int)e.size())
-                    return -1;
-            }
-        }
-        if (schema.axisNames.size() == 1)
-            return ia;
-        if (schema.axisNames.size() == 2)
-        {
-            int nx = (int)schema.edges[0].size() - 1;
-            return (ia >= 0 && ib >= 0) ? ib * nx + ia : -1;
-        }
-        return -1;
-    }
-};
-
-// globals for Map→Reduce
-static std::string MR_run_uid = "";
-static int MR_chunk_id = 0;
-static std::string MR_schema_path = "";
-static bool MR_emit_micro = false; // default OFF
-static MR_Accumulator MR_acc;
-static BinSchema MR_schema; // global
-
-// ---- MR helpers (forward decls) ----
-static std::string MR_compute_config_hash();
-static inline void MR_extract_axes(double mm_corr, double mgg,
-                                   double &ax_mx, double &ax_mg);
-
-// ─────────────────────────── helpers ───────────────────────────
-
-// ---- MR helpers (definitions) ----
-static std::string MR_compute_config_hash()
-{
-    std::ostringstream ss;
-    ss << std::setprecision(8)
-       << "CWIN:" << C_LO << "," << C_HI
-       << ";SIDES:" << NPOS << "," << NNEG
-       << ";UD:" << kUP_v5 << "," << kDN_v5
-       // NOTE: use g_MGW.mu etc. (no parentheses)
-       << ";g_MGW:" << g_MGW.mu << "," << g_MGW.sigma << "," << g_MGW.nsig
-       << ";MM:" << nMM << "," << mmLo << "," << mmHi
-       << ";MG:" << nMG << "," << mgLo << "," << mgHi;
-
-    auto s = ss.str();
-    uint64_t h = 1469598103934665603ull; // FNV-1a
-    for (unsigned char c : s)
-    {
-        h ^= c;
-        h *= 1099511628211ull;
-    }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
-    return std::string(buf);
-}
-
-static inline void MR_extract_axes(double mm_corr, double mgg,
-                                   double &ax_mx, double &ax_mg)
-{
-    ax_mx = mm_corr;
-    ax_mg = mgg;
-}
 
 static double parse_json_double(const std::string &s, const char *key, double defval)
 {
@@ -315,7 +128,6 @@ static double parse_json_double(const std::string &s, const char *key, double de
     double v = std::strtod(s.c_str() + p, &endp);
     return (endp == s.c_str() + p) ? defval : v;
 }
-
 static std::string parse_json_string(const std::string &s, const char *key, const char *defval)
 {
     std::string pat = std::string("\"") + key + "\"";
@@ -362,8 +174,8 @@ static MggWindow load_mgg_window_from_json(const std::string &json_path, double 
 
 struct MggWeights
 {
-    TH1D *hWsig = nullptr; // per-bin w_sig
-    TH1D *hUsed = nullptr; // rebinned data used in fit (binning reference)
+    TH1D *hWsig = nullptr; // w_sig per bin
+    TH1D *hUsed = nullptr; // rebinned data used in the fit (binning reference)
     bool ok() const { return hWsig && hUsed; }
 };
 
@@ -381,19 +193,6 @@ static MggWeights load_mgg_weights(const std::string &path = "fit_mgg_roofit_out
         W.hUsed->SetDirectory(nullptr);
     return W;
 }
-
-// Globals so fillFromFile() can see them
-
-static MggWeights g_MGWts;
-
-// Optional QA + skim (created in main, filled in fillFromFile)
-static TH1D *g_hMG_pass = nullptr;
-static TTree *g_tSkim = nullptr;
-
-// Skim branches (keep trivial; you can extend with 4-vectors later)
-static Long64_t g_skim_eventnum = 0; // (bind real branch later if/when available)
-static double g_skim_mgg = 0.0, g_skim_wsig = 1.0;
-static int g_skim_pass_pi0 = 0;
 
 // Fiducial gate (adjust numbers to your full script if needed)
 inline bool goodXY(double x, double y)
@@ -857,61 +656,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
     tr->SetBranchStatus("NPS.cal.clusY", 1);
     tr->SetBranchAddress("NPS.cal.clusY", cY);
 
-    // ===== Map→Reduce: per-category tally =====
-    // cat: 0=CC, 1=V, 2=H, 3=AD (AA_diag), 4=AP (AA_pure)
-    auto MR_tally_cat = [&](int bin_id, bool isData, int updn, int cat)
-    {
-        if (!MR_schema.valid())
-            return;
-        if (bin_id < 0 || bin_id >= (int)MR_acc.bins.size())
-            return;
-        MR_BinRow &r = MR_acc.bins[bin_id];
-        auto bump = [&](double &x)
-        { x += 1.0; };
-        if (isData)
-        {
-            if (cat == 0)
-                bump(r.CC_data);
-            else if (cat == 1)
-                bump(r.V_data);
-            else if (cat == 2)
-                bump(r.H_data);
-            else if (cat == 3)
-                bump(r.AD_data);
-            else
-                bump(r.AP_data);
-        }
-        else
-        {
-            if (updn > 0)
-            { // +1 = DN; -1 = UP (matches your yavg sign)
-                if (cat == 0)
-                    bump(r.CC_dn);
-                else if (cat == 1)
-                    bump(r.V_dn);
-                else if (cat == 2)
-                    bump(r.H_dn);
-                else if (cat == 3)
-                    bump(r.AD_dn);
-                else
-                    bump(r.AP_dn);
-            }
-            else
-            {
-                if (cat == 0)
-                    bump(r.CC_up);
-                else if (cat == 1)
-                    bump(r.V_up);
-                else if (cat == 2)
-                    bump(r.H_up);
-                else if (cat == 3)
-                    bump(r.AD_up);
-                else
-                    bump(r.AP_up);
-            }
-        }
-    };
-
     const bool isDummy = (std::string(tag) == "dummy");
 
     const Long64_t N = tr->GetEntries();
@@ -981,17 +725,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
 
                     if (mg > 0)
                         O.hMG_CC.Fill(mg);
-                    // ---- Map→Reduce tally (CC) ----
-                    if (MR_schema.valid())
-                    {
-                        double ax_mx = 0, ax_mg = 0;
-                        MR_extract_axes(mm_corr, mg, ax_mx, ax_mg);
-                        int bid = MR_acc.locate(ax_mx, ax_mg);
-                        int updn = (isDummy ? (yavg >= 0 ? +1 : -1) : 0);
-                        MR_tally_cat(bid, /*isData=*/!isDummy, /*updn*/ updn, /*cat=*/0);
-                    }
-                    // --------------------------------
-
                     if (isDummy)
                     {
                         (yavg >= 0 ? O.hMM_CC_DN : O.hMM_CC_UP).Fill(mm_corr);
@@ -1015,17 +748,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     O.hMM_V.Fill(mm_corr);
                     if (mg > 0)
                         O.hMG_V.Fill(mg);
-                    // ---- Map→Reduce tally (V) ----
-                    if (MR_schema.valid())
-                    {
-                        double ax_mx = 0, ax_mg = 0;
-                        MR_extract_axes(mm_corr, mg, ax_mx, ax_mg);
-                        int bid = MR_acc.locate(ax_mx, ax_mg);
-                        int updn = (isDummy ? (yavg >= 0 ? +1 : -1) : 0);
-                        MR_tally_cat(bid, /*isData=*/!isDummy, /*updn*/ updn, /*cat=*/1);
-                    }
-                    // --------------------------------
-
                     if (isDummy)
                     {
                         (yavg >= 0 ? O.hMM_V_DN : O.hMM_V_UP).Fill(mm_corr);
@@ -1038,17 +760,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     O.hMM_H.Fill(mm_corr);
                     if (mg > 0)
                         O.hMG_H.Fill(mg);
-                    // ---- Map→Reduce tally (H) ----
-                    if (MR_schema.valid())
-                    {
-                        double ax_mx = 0, ax_mg = 0;
-                        MR_extract_axes(mm_corr, mg, ax_mx, ax_mg);
-                        int bid = MR_acc.locate(ax_mx, ax_mg);
-                        int updn = (isDummy ? (yavg >= 0 ? +1 : -1) : 0);
-                        MR_tally_cat(bid, /*isData=*/!isDummy, /*updn*/ updn, /*cat=*/2);
-                    }
-                    // --------------------------------
-
                     if (isDummy)
                     {
                         (yavg >= 0 ? O.hMM_H_DN : O.hMM_H_UP).Fill(mm_corr);
@@ -1061,17 +772,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     O.hMM_AD.Fill(mm_corr);
                     if (mg > 0)
                         O.hMG_AD.Fill(mg);
-                    // ---- Map→Reduce tally (AD) ----
-                    if (MR_schema.valid())
-                    {
-                        double ax_mx = 0, ax_mg = 0;
-                        MR_extract_axes(mm_corr, mg, ax_mx, ax_mg);
-                        int bid = MR_acc.locate(ax_mx, ax_mg);
-                        int updn = (isDummy ? (yavg >= 0 ? +1 : -1) : 0);
-                        MR_tally_cat(bid, /*isData=*/!isDummy, /*updn*/ updn, /*cat=*/3);
-                    }
-                    // --------------------------------
-
                     if (isDummy)
                     {
                         (yavg >= 0 ? O.hMM_AD_DN : O.hMM_AD_UP).Fill(mm_corr);
@@ -1084,17 +784,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     O.hMM_AP.Fill(mm_corr);
                     if (mg > 0)
                         O.hMG_AP.Fill(mg);
-                    // ---- Map→Reduce tally (AP) ----
-                    if (MR_schema.valid())
-                    {
-                        double ax_mx = 0, ax_mg = 0;
-                        MR_extract_axes(mm_corr, mg, ax_mx, ax_mg);
-                        int bid = MR_acc.locate(ax_mx, ax_mg);
-                        int updn = (isDummy ? (yavg >= 0 ? +1 : -1) : 0);
-                        MR_tally_cat(bid, /*isData=*/!isDummy, /*updn*/ updn, /*cat=*/4);
-                    }
-                    // --------------------------------
-
                     if (isDummy)
                     {
                         (yavg >= 0 ? O.hMM_AP_DN : O.hMM_AP_UP).Fill(mm_corr);
@@ -1111,39 +800,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
             O.hMM_CC_evt.Fill(bestMM);
             if (bestMG > 0)
                 O.hMG_CC_evt.Fill(bestMG);
-
-            // --- pi0 2σ selection + per-bin background weights (global sidecars) ---
-            if (bestMG > 0 && g_MGW.ok)
-            {
-                const bool pass_mgg_window = (bestMG >= g_MGW.lo && bestMG <= g_MGW.hi);
-                if (pass_mgg_window)
-                {
-                    double w_sig = 1.0;
-                    if (g_MGWts.ok())
-                    {
-                        int ibin = g_MGWts.hUsed->GetXaxis()->FindBin(bestMG);
-                        if (ibin < 1)
-                            ibin = 1;
-                        if (ibin > g_MGWts.hUsed->GetNbinsX())
-                            ibin = g_MGWts.hUsed->GetNbinsX();
-                        w_sig = g_MGWts.hWsig->GetBinContent(ibin);
-                        // If you prefer to forbid negatives, uncomment:
-                        // if (w_sig < 0.0) w_sig = 0.0;
-                        // if (w_sig > 1.0) w_sig = 1.0;
-                    }
-                    if (g_hMG_pass)
-                        g_hMG_pass->Fill(bestMG, w_sig);
-
-                    // Minimal skim (extend later with 4-vectors/kinematics)
-                    g_skim_eventnum = 0; // TODO: bind actual event id branch when available
-                    g_skim_mgg = bestMG;
-                    g_skim_wsig = w_sig;
-                    g_skim_pass_pi0 = 1;
-                    if (g_tSkim)
-                        g_tSkim->Fill();
-                }
-            }
-
             if (isDummy)
             {
                 if (bestYavg >= 0)
@@ -1413,115 +1069,19 @@ int main(int argc, char **argv)
     if (argc >= 6)
         Qdum = atof(argv[5]);
 
-    // ===== Map→Reduce CLI (non-breaking) =====
-    // Accept extra flags anywhere after the positional args
-    for (int i = 1; i < argc; i++)
-    {
-        if (!strcmp(argv[i], "--bin-schema") && i + 1 < argc)
-        {
-            MR_schema_path = argv[++i];
-            continue;
-        }
-        if (!strcmp(argv[i], "--map-run-uid") && i + 1 < argc)
-        {
-            MR_run_uid = argv[++i];
-            continue;
-        }
-        if (!strcmp(argv[i], "--chunk-id") && i + 1 < argc)
-        {
-            MR_chunk_id = atoi(argv[++i]);
-            continue;
-        }
-        if (!strcmp(argv[i], "--emit-microntuples") && i + 1 < argc)
-        {
-            MR_emit_micro = (std::string(argv[++i]) == "on");
-            continue;
-        }
-    }
-    // after parsing args and before the event loop
-    const std::string MR_CONFIG_HASH = MR_compute_config_hash();
-
-    if (!MR_schema_path.empty())
-    {
-        MR_schema = MR_loadBinSchema(MR_schema_path);
-        if (MR_schema.valid())
-            MR_acc.init(MR_schema);
-    }
-
-    if (MR_run_uid.empty())
-    {
-        MR_run_uid = TUUID().AsString();
-    }
-    // ===== End Map→Reduce CLI =====
-
     std::cout << "[Inputs] data=" << dataF << "  dummy=" << dummyF << "  out=" << outF << "\n";
     std::cout << "[Norm]   Q_data=" << Qdata << "  Q_dummy=" << Qdum
               << "  (kUP=" << kUP_v5 << ", kDN=" << kDN_v5 << ")\n";
 
     // Fill from files
-
-    // --- mgg sidecars (2σ window and weights) ---
-    const std::string mgg_json_sidecar = "mgg_roofit_sb.json";
-    const std::string mgg_root_sidecar = "fit_mgg_roofit_out.root";
-
-    g_MGW = load_mgg_window_from_json(mgg_json_sidecar, 2.0);
-    if (!g_MGW.ok)
-    {
-        std::cerr << "[mgg-cut] WARN: cannot read " << mgg_json_sidecar
-                  << " — fallback mu=0.135 sigma=0.006 (±2σ)\n";
-        g_MGW.ok = true;
-        g_MGW.mu = 0.135;
-        g_MGW.sigma = 0.006;
-        g_MGW.lo = g_MGW.mu - 2.0 * g_MGW.sigma;
-        g_MGW.hi = g_MGW.mu + 2.0 * g_MGW.sigma;
-    }
-    std::cout << std::fixed << std::setprecision(6)
-              << "[mgg-cut] mu=" << g_MGW.mu << "  sigma=" << g_MGW.sigma
-              << "  window=[" << g_MGW.lo << "," << g_MGW.hi << "]"
-              << "  (mode=" << g_MGW.signal_mode << ", ord=" << g_MGW.order
-              << ", rebin=" << g_MGW.rebin << ")\n";
-
-    g_MGWts = load_mgg_weights(mgg_root_sidecar);
-    if (!g_MGWts.ok())
-    {
-        std::cerr << "[mgg-weights] WARN: no hW_sig/h_mgg_used in " << mgg_root_sidecar
-                  << " — using w_sig=1 for passes.\n";
-    }
-
-    // Book a “passed 2σ (weighted)” QA hist with your global mg binning
-    if (!g_hMG_pass)
-    {
-        g_hMG_pass = new TH1D("hMG_CC_evt_pass_2sigma", "m_{#gamma#gamma} passed 2#sigma (weighted);M_{#gamma#gamma} (GeV);Counts",
-                              nMG, mgLo, mgHi);
-        g_hMG_pass->SetDirectory(nullptr);
-    }
-
     Pack D("data");
     fillFromFile(dataF, "data", D);
     Pack M("dummy");
     fillFromFile(dummyF, "dummy", M);
 
-    // --- Open output FIRST so anything that writes has a real file target ---
+    // Open output FIRST so any internal Write() calls (e.g. in doDummyThenA) work
     TFile fout(outF, "RECREATE");
     fout.cd();
-
-    // --- CREATE & ATTACH SKIM TREE HERE (before any filling) ---
-    g_tSkim = new TTree("Skim", "Skim (pi0 2sigma)");
-    g_tSkim->SetDirectory(&fout);           // <-- critical: make it file-resident
-    g_tSkim->SetAutoSave(10 * 1024 * 1024); // optional QoL
-    g_tSkim->SetAutoFlush(10000);           // optional QoL
-
-    // branch backing variables (init once)
-    g_skim_eventnum = 0;
-    g_skim_mgg = 0.0;
-    g_skim_wsig = 1.0;
-    g_skim_pass_pi0 = 0;
-
-    // define branches ONCE
-    g_tSkim->Branch("eventnum", &g_skim_eventnum, "eventnum/L");
-    g_tSkim->Branch("mgg", &g_skim_mgg, "mgg/D");
-    g_tSkim->Branch("w_sig", &g_skim_wsig, "w_sig/D");
-    g_tSkim->Branch("pass_pi0", &g_skim_pass_pi0, "pass_pi0/I");
 
     // Do dummy-first then Option-A for both MM and Mgg
     Pack OUT("final");
@@ -1580,209 +1140,6 @@ int main(int argc, char **argv)
     OUT.hMM_Sub.Write();
     OUT.hMG_Best.Write();
     OUT.hMG_Sub.Write();
-
-    // --- Persist what cut/weights we used this run
-    {
-        // Locals pulled from globals/paths already set earlier
-        double mu_v = g_MGW.mu;
-        double sigma_v = g_MGW.sigma;
-        double lo_v = g_MGW.lo;
-        double hi_v = g_MGW.hi;
-        double nsig_v = g_MGW.nsig;
-        int order_v = g_MGW.order;
-        int rebin_v = g_MGW.rebin;
-        std::string mode_v = g_MGW.signal_mode;
-        std::string json = mgg_json_sidecar;
-        std::string weights = mgg_root_sidecar;
-
-        TTree *tMggCut = new TTree("MggCut", "MggCut");
-        tMggCut->Branch("mu", &mu_v);
-        tMggCut->Branch("sigma", &sigma_v);
-        tMggCut->Branch("lo", &lo_v);
-        tMggCut->Branch("hi", &hi_v);
-        tMggCut->Branch("nsig", &nsig_v);
-        tMggCut->Branch("order", &order_v);
-        tMggCut->Branch("rebin", &rebin_v);
-        tMggCut->Branch("mode", &mode_v);
-        tMggCut->Branch("json_path", &json);
-        tMggCut->Branch("weights_path", &weights);
-        tMggCut->Fill();
-        tMggCut->Write();
-    }
-
-    // Write the new QA histogram and skim (if they were created)
-    if (g_hMG_pass)
-        g_hMG_pass->Write();
-    if (g_tSkim)
-        g_tSkim->Write();
-
-    // ================== Map→Reduce: write per-run per-bin table ==================
-    if (MR_schema.valid())
-    {
-        // Recompute the same geometry scalars used in doDummyThenA() so algebra matches
-        const double Wsig = (C_LO < C_HI) ? (C_HI - C_LO) : 0.0;
-        double Wpos = 0.0, Wneg = 0.0;
-        for (int i = 0; i < NPOS; ++i)
-            Wpos += (posWins[i].hi - posWins[i].lo);
-        for (int i = 0; i < NNEG; ++i)
-            Wneg += (negWins[i].hi - negWins[i].lo);
-
-        const double ACC = Wsig; // your code uses this to normalize stripes
-        const double aV = (Wpos + Wneg) > 0.0 ? (Wsig / (Wpos + Wneg)) : 0.0;
-        const double aH = aV;
-
-        // A_AD (diagonals) and A_AP (anti-diagonals) geometry weights (match doDummyThenA)
-        auto sumSquares = [&](const Win *w, int n)
-        {
-            double s = 0.0;
-            for (int i = 0; i < n; i++)
-                s += (w[i].hi - w[i].lo) * (w[i].hi - w[i].lo);
-            return s;
-        };
-        const double sumSqPos = sumSquares(posWins, NPOS);
-        const double sumSqNeg = sumSquares(negWins, NNEG);
-        const double A_AD = sumSqPos + sumSqNeg; // same-stripe squares (LL + UR)
-        const double A_AP = 2.0 * Wpos * Wneg;   // off-diagonal corners (UL + LR)
-
-        const double aAD = (A_AD > 0) ? (ACC / A_AD) : 0.0;
-        const double aAP = (A_AP > 0) ? (ACC / A_AP) : 0.0;
-
-        // Build TTREE
-        fout.cd();
-        TTree tb("bins", "per-run per-bin yields (dummy-first, Option-A)");
-
-        int bin_id = -1;
-        int iMx = -1, iMg = -1;
-        double edgeMx_lo = 0, edgeMx_hi = 0, edgeMg_lo = 0, edgeMg_hi = 0;
-        double SumW = 0, SumW2 = 0;
-        double SumW_data = 0, SumW_dummyUP = 0, SumW_dummyDN = 0, SumW_acc = 0;
-
-        tb.Branch("bin_id", &bin_id, "bin_id/I");
-        if (MR_schema.axisNames.size() >= 1)
-        {
-            tb.Branch("iMx", &iMx, "iMx/I");
-            tb.Branch("edgeMx_lo", &edgeMx_lo, "edgeMx_lo/D");
-            tb.Branch("edgeMx_hi", &edgeMx_hi, "edgeMx_hi/D");
-        }
-        if (MR_schema.axisNames.size() >= 2)
-        {
-            tb.Branch("iMg", &iMg, "iMg/I");
-            tb.Branch("edgeMg_lo", &edgeMg_lo, "edgeMg_lo/D");
-            tb.Branch("edgeMg_hi", &edgeMg_hi, "edgeMg_hi/D");
-        }
-        tb.Branch("SumW", &SumW, "SumW/D");
-        tb.Branch("SumW2", &SumW2, "SumW2/D");
-        tb.Branch("SumW_data", &SumW_data, "SumW_data/D");
-        tb.Branch("SumW_dummyUP", &SumW_dummyUP, "SumW_dummyUP/D");
-        tb.Branch("SumW_dummyDN", &SumW_dummyDN, "SumW_dummyDN/D");
-        tb.Branch("SumW_acc", &SumW_acc, "SumW_acc/D");
-
-        // Store BinEdges/ once for convenience
-        TDirectory *dBE = fout.GetDirectory("BinEdges");
-        if (!dBE)
-            dBE = fout.mkdir("BinEdges");
-        dBE->cd();
-        for (size_t ax = 0; ax < MR_schema.axisNames.size(); ++ax)
-        {
-            TVectorD v((int)MR_schema.edges[ax].size());
-            for (int i = 0; i < v.GetNoElements(); ++i)
-                v[i] = MR_schema.edges[ax][i];
-            v.Write(MR_schema.axisNames[ax].c_str(), TObject::kOverwrite);
-        }
-        fout.cd();
-
-        // Algebra per bin (dummy first → A-method), using same factors as in doDummyThenA()
-        int nx = (MR_schema.edges[0].size() > 0) ? (int)MR_schema.edges[0].size() - 1 : 1;
-
-        for (size_t b = 0; b < MR_acc.bins.size(); ++b)
-        {
-            const MR_BinRow &r = MR_acc.bins[b];
-
-            // 1) Dummy normalization per category, scaled from dummy→data exposure
-            auto norm_dummy = [&](double up, double dn) -> double
-            {
-                if (Qdum <= 0)
-                    return 0.0;
-                double cup = 1.0 / (Qdum * kUP_v5);
-                double cdn = 1.0 / (Qdum * kDN_v5);
-                double per_uC = up * cup + dn * cdn; // per unit charge
-                return per_uC * Qdata;               // scale to data charge seen
-            };
-
-            double CC_afterDummy = r.CC_data - norm_dummy(r.CC_up, r.CC_dn);
-            double V_afterDummy = r.V_data - norm_dummy(r.V_up, r.V_dn);
-            double H_afterDummy = r.H_data - norm_dummy(r.H_up, r.H_dn);
-            double AD_afterDummy = r.AD_data - norm_dummy(r.AD_up, r.AD_dn);
-            double AP_afterDummy = r.AP_data - norm_dummy(r.AP_up, r.AP_dn);
-
-            // 2) A-method Best (exactly mirrors your doDummyThenA combination)
-            double Best = 0.5 * aV * V_afterDummy + 0.5 * aH * H_afterDummy + aAD * AD_afterDummy - aAP * AP_afterDummy;
-
-            double FinalSUB = CC_afterDummy - Best;
-
-            // 3) Variances (Poisson for counts; include scale factors^2 for dummy)
-            auto var_dummy = [&](double up, double dn) -> double
-            {
-                if (Qdum <= 0)
-                    return 0.0;
-                double cup = 1.0 / (Qdum * kUP_v5);
-                double cdn = 1.0 / (Qdum * kDN_v5);
-                double var_per_uC = up * cup * cup + dn * cdn * cdn;
-                return var_per_uC * Qdata * Qdata;
-            };
-
-            double var_CC_afterDummy = r.CC_data + var_dummy(r.CC_up, r.CC_dn);
-            double var_V_afterDummy = r.V_data + var_dummy(r.V_up, r.V_dn);
-            double var_H_afterDummy = r.H_data + var_dummy(r.H_up, r.H_dn);
-            double var_AD_afterDummy = r.AD_data + var_dummy(r.AD_up, r.AD_dn);
-            double var_AP_afterDummy = r.AP_data + var_dummy(r.AP_up, r.AP_dn);
-
-            double var_Best = (0.5 * aV) * (0.5 * aV) * var_V_afterDummy + (0.5 * aH) * (0.5 * aH) * var_H_afterDummy + (aAD) * (aAD)*var_AD_afterDummy + (-aAP) * (-aAP) * var_AP_afterDummy; // subtractive term
-
-            double var_Final = var_CC_afterDummy + var_Best; // CC - Best ⇒ add variances
-
-            // Fill row
-            bin_id = (int)b;
-            if (MR_schema.axisNames.size() == 1)
-            {
-                iMx = bin_id;
-                edgeMx_lo = MR_schema.edges[0][iMx];
-                edgeMx_hi = MR_schema.edges[0][iMx + 1];
-            }
-            else if (MR_schema.axisNames.size() == 2)
-            {
-                iMx = (int)(b % nx);
-                iMg = (int)(b / nx);
-                edgeMx_lo = MR_schema.edges[0][iMx];
-                edgeMx_hi = MR_schema.edges[0][iMx + 1];
-                edgeMg_lo = MR_schema.edges[1][iMg];
-                edgeMg_hi = MR_schema.edges[1][iMg + 1];
-            }
-
-            SumW = FinalSUB;
-            SumW2 = std::max(0.0, var_Final);
-
-            // Audits (compact)
-            SumW_data = r.CC_data;
-            SumW_dummyUP = r.CC_up;
-            SumW_dummyDN = r.CC_dn;
-            SumW_acc = Best;
-
-            tb.Fill();
-        }
-
-        // Metadata for reducer guardrails
-        TNamed("bin_schema_id", MR_schema.id.c_str()).Write();
-        TNamed("config_hash", MR_CONFIG_HASH.c_str()).Write();
-        TNamed("run_uid", MR_run_uid.c_str()).Write();
-        TParameter<int>("chunk_id", MR_chunk_id).Write("chunk_id");
-        TParameter<double>("Q_data", Qdata).Write("Q_data");
-        TParameter<double>("Q_dummy", Qdum).Write("Q_dummy");
-
-        tb.Write("", TObject::kOverwrite);
-        std::cerr << "[bins] wrote per-run table with " << MR_acc.bins.size() << " bins\n";
-    }
-    // =============================================================================
 
     // Simple overlays
     {
@@ -1854,10 +1211,6 @@ int main(int argc, char **argv)
         fout.cd();
         hDeltaM_vs_CorrFac.Write();
         hMxCorr_vs_MxRaw.Write();
-        if (g_hMG_pass)
-            g_hMG_pass->Write(); // QA hist (optional)
-        if (g_tSkim)
-            g_tSkim->Write(); // <-- PUT THIS HERE
     }
 
     // ───────────── 2D timing map with region boxes (DATA pairs; CC not subtracted) ─────────────

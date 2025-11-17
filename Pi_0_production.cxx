@@ -21,6 +21,8 @@
 // - MM kinematics uses beam+proton target and HMS e' 4-vector; NPS photon dirs from (x,y,NPS_dist) rotated by NPS theta.
 // - Mgg uses a simple small-angle estimate from cluster separations; replace with your full routine if desired.
 
+#include <regex>
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -36,6 +38,18 @@
 #include <TH1D.h>
 #include <TCanvas.h>
 #include <TROOT.h>
+#include <RooRealVar.h>
+#include <RooDataHist.h>
+#include <RooGaussian.h>
+#include <RooAddPdf.h>
+#include <RooArgList.h>
+#include <RooPlot.h>
+#include <RooBernstein.h>
+#include <yaml-cpp/yaml.h> // for YAML::Node / YAML::LoadFile
+
+#ifdef HAVE_YAML_CPP
+#include <yaml-cpp/yaml.h>
+#endif
 
 #include "TFile.h"
 #include "TTree.h"
@@ -56,6 +70,45 @@
 #include "TVectorD.h"
 #include "TUUID.h"
 #include "TH2D.h"
+#include "TLeaf.h"        // for TLeaf::GetName(), GetTypeName()
+#include "RooFitResult.h" // for owning/return type of fitTo(...)
+
+// ======= [ADD] structs for normalization & mgg-window =======
+struct RunNorm
+{
+    double Q_data = 0.0;  // from CLI
+    double Q_dummy = 0.0; // from CLI
+    double kUP = 1.0;     // from config
+    double kDN = 1.0;     // from config
+} gNorm;
+
+struct MGW
+{
+    bool ok = false;
+    double mu = 0.0;
+    double sigma = 0.0;
+    double lo = 0.0;
+    double hi = 0.0;
+    double nsig = 2.0; // default: 2σ window
+
+    // Added to support YAML-configurable fit:
+    int order = 2;                     // Bernstein(k) order
+    int rebin = 1;                     // histogram rebin factor
+    std::string signal_mode = "gauss"; // "gauss" | "doubleG" | "cb"
+} g_MGW;
+
+// ======= [ADD] simple PDF bin integral helper =======
+static double pdfYieldInBin(const RooAbsPdf &pdf, RooRealVar &x,
+                            double xlo, double xhi, double Ntot)
+{
+    const double oldLo = x.getMin();
+    const double oldHi = x.getMax();
+    x.setRange("bin", xlo, xhi);
+    const std::unique_ptr<RooAbsReal> I(pdf.createIntegral(x, RooFit::NormSet(x), RooFit::Range("bin")));
+    const double frac = I->getVal();
+    x.setRange(oldLo, oldHi);
+    return Ntot * frac;
+}
 
 // Enable ALL-PAIRS Template-A with pairs→event scaling (matches full v5)
 #ifndef USE_PAIR_TEMPLATE
@@ -101,8 +154,8 @@ static constexpr int nMG = 200;
 static constexpr double mgLo = 0.05, mgHi = 0.2;
 
 // v5 timing dummy normalization factors
-static constexpr double kUP_v5 = 8.467; // upstream
-static constexpr double kDN_v5 = 4.256; // downstream
+static double kUP_v5 = 8.467; // upstream
+static double kDN_v5 = 4.256; // downstream
 
 // ---- mγγ window (placed early so MR_compute_config_hash() can see it) ----
 struct MggWindow
@@ -112,9 +165,6 @@ struct MggWindow
     int order = 2, rebin = 1;
     bool ok = false;
 };
-
-// Define g_MGW here so it's in scope for MR_compute_config_hash()
-static MggWindow g_MGW;
 
 // ===================== Map→Reduce support (schema + accumulator) =====================
 struct BinSchema
@@ -261,12 +311,113 @@ static bool MR_emit_micro = false; // default OFF
 static MR_Accumulator MR_acc;
 static BinSchema MR_schema; // global
 
+// DATA event number (bound to input tree branch "evnum")
+static ULong64_t g_evnum = 0;
+bool g_ev_is_int = false, g_ev_is_dbl = false;
+Int_t g_ev_i = 0;
+Long64_t g_ev_l = 0;
+Double_t g_ev_d = 0.0;
+
 // ---- MR helpers (forward decls) ----
 static std::string MR_compute_config_hash();
 static inline void MR_extract_axes(double mm_corr, double mgg,
                                    double &ax_mx, double &ax_mg);
 
 // ─────────────────────────── helpers ───────────────────────────
+// --- Per-entry record bound to the DATA tree ---
+struct GEntry
+{
+    ULong64_t evnum = 0; // event number (matches ROOT leaf "evnum"; use ULong64_t even if leaf is I)
+    double xB = 0, Q2 = 0, z = 0, pT = 0, t = 0, phi = 0;
+    double Mx_raw = 0, Mx_corr = 0;
+    double mgg = 0; // invariant mass per event/pair, as you compute/fill it
+} g;
+
+// === Build ±nsig window from a Gaussian ⊕ Bernstein(k) fit on the final mgg (dummy+acc subtracted) ===
+static void BuildMggWindow_Bernstein(TH1 *hFinal_mgg, int bern_order, int rebin_factor)
+{
+    if (!hFinal_mgg)
+    {
+        std::cerr << "[auto-fit] null hFinal_mgg\n";
+        g_MGW.ok = false;
+        return;
+    }
+
+    // work on a local clone; keep original binning for later lookups
+    TH1 *hFit = (TH1 *)hFinal_mgg->Clone("hFinal_mgg_fit");
+    hFit->SetDirectory(nullptr);
+    hFit->Sumw2();
+    if (rebin_factor > 1)
+    {
+        TH1 *tmp = hFit->Rebin(rebin_factor, "hFinal_mgg_fit_reb");
+        hFit = dynamic_cast<TH1 *>(tmp);
+        if (!hFit)
+        {
+            std::cerr << "[auto-fit] rebin failed\n";
+            g_MGW.ok = false;
+            return;
+        }
+        hFit->SetDirectory(nullptr);
+        hFit->Sumw2();
+    }
+
+    // fit range (use your study’s if you expose them; these are safe defaults)
+    double mmin = 0.08, mmax = 0.18;
+
+    RooRealVar m("m", "m_{#gamma#gamma} [GeV]", mmin, mmax);
+    m.setBins(std::max(20, hFit->GetNbinsX()));
+    RooDataHist dh("dh", "dh", RooArgList(m), hFit);
+
+    // Signal: Gaussian, seeded from any prior g_MGW if present
+    RooRealVar mu("mu", "mu", (g_MGW.mu > 0 ? g_MGW.mu : 0.135), 0.120, 0.150);
+    RooRealVar sg("sigma", "sigma", (g_MGW.sigma > 0 ? g_MGW.sigma : 0.010), 0.003, 0.020);
+    RooGaussian gaus("gaus", "gaus", m, mu, sg);
+
+    // Background: Bernstein(k)
+    const int K = std::max(1, bern_order);
+    RooArgList coeffs;
+    std::vector<std::unique_ptr<RooRealVar>> keep;
+    keep.reserve(K + 1);
+    for (int i = 0; i <= K; i++)
+    {
+        auto v = std::make_unique<RooRealVar>(Form("c%d", i), Form("c%d", i), 0.1, 0.0, 1e6);
+        coeffs.add(*v);
+        keep.emplace_back(std::move(v));
+    }
+    RooBernstein bkg("bkg", "bernstein", m, coeffs);
+
+    // Extended S+B
+    const double N = hFit->Integral();
+    RooRealVar nS("nS", "signal", 0.6 * N, 0.0, 10.0 * N + 1.0);
+    RooRealVar nB("nB", "bkg", 0.4 * N, 0.0, 10.0 * N + 1.0);
+    RooAddPdf model("model", "S+B", RooArgList(gaus, bkg), RooArgList(nS, nB));
+    model.fitTo(dh, RooFit::Extended(true), RooFit::Save(true),
+                RooFit::PrintLevel(-1), RooFit::Warnings(false), RooFit::SumW2Error(true));
+
+    // commit μ, σ, window from your configured nsig
+    g_MGW.mu = mu.getVal();
+    g_MGW.sigma = sg.getVal();
+    g_MGW.lo = g_MGW.mu - g_MGW.nsig * g_MGW.sigma;
+    g_MGW.hi = g_MGW.mu + g_MGW.nsig * g_MGW.sigma;
+    g_MGW.ok = true;
+
+    // provenance (optional)
+    TTree *tCut = new TTree("MggCut", "MggCut");
+    double mu_out = g_MGW.mu, sg_out = g_MGW.sigma, lo_out = g_MGW.lo, hi_out = g_MGW.hi, ns = g_MGW.nsig;
+    int ord_out = K, reb_out = rebin_factor;
+    tCut->Branch("mu", &mu_out, "mu/D");
+    tCut->Branch("sigma", &sg_out, "sigma/D");
+    tCut->Branch("lo", &lo_out, "lo/D");
+    tCut->Branch("hi", &hi_out, "hi/D");
+    tCut->Branch("nsig", &ns, "nsig/D");
+    tCut->Branch("order", &ord_out, "order/I");
+    tCut->Branch("rebin", &reb_out, "rebin/I");
+    tCut->Fill();
+    tCut->Write();
+
+    std::cout << "[auto-fit] mu=" << g_MGW.mu << " sigma=" << g_MGW.sigma
+              << " nsig=" << g_MGW.nsig << " window=[" << g_MGW.lo << "," << g_MGW.hi << "]\n";
+}
 
 // ---- MR helpers (definitions) ----
 static std::string MR_compute_config_hash()
@@ -362,8 +513,8 @@ static MggWindow load_mgg_window_from_json(const std::string &json_path, double 
 
 struct MggWeights
 {
-    TH1D *hWsig = nullptr; // per-bin w_sig
-    TH1D *hUsed = nullptr; // rebinned data used in fit (binning reference)
+    TH1 *hWsig = nullptr; // per-bin w_sig
+    TH1 *hUsed = nullptr; // rebinned data used in fit (binning reference)
     bool ok() const { return hWsig && hUsed; }
 };
 
@@ -373,8 +524,8 @@ static MggWeights load_mgg_weights(const std::string &path = "fit_mgg_roofit_out
     std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
     if (!f || f->IsZombie())
         return W;
-    W.hWsig = dynamic_cast<TH1D *>(f->Get("hW_sig"));
-    W.hUsed = dynamic_cast<TH1D *>(f->Get("h_mgg_used"));
+    W.hWsig = dynamic_cast<TH1 *>(f->Get("hW_sig"));
+    W.hUsed = dynamic_cast<TH1 *>(f->Get("h_mgg_used"));
     if (W.hWsig)
         W.hWsig->SetDirectory(nullptr);
     if (W.hUsed)
@@ -387,12 +538,13 @@ static MggWeights load_mgg_weights(const std::string &path = "fit_mgg_roofit_out
 static MggWeights g_MGWts;
 
 // Optional QA + skim (created in main, filled in fillFromFile)
-static TH1D *g_hMG_pass = nullptr;
+static TH1 *g_hMG_pass = nullptr;
 static TTree *g_tSkim = nullptr;
 
 // Skim branches (keep trivial; you can extend with 4-vectors later)
-static Long64_t g_skim_eventnum = 0; // (bind real branch later if/when available)
-static double g_skim_mgg = 0.0, g_skim_wsig = 1.0;
+static ULong64_t g_skim_eventnum = 0; // event number from g.evnum / evnum / eventnum
+static double g_skim_mgg = 0.0;
+static double g_skim_wsig = 1.0;
 static int g_skim_pass_pi0 = 0;
 
 // Fiducial gate (adjust numbers to your full script if needed)
@@ -804,6 +956,7 @@ struct Pack
 // ─────────────────────── file processing ───────────────────────
 static void fillFromFile(const TString &inF, const char *tag, Pack &O)
 {
+    const bool isDummy = (tag && std::strcmp(tag, "dummy") == 0);
     TFile f(inF, "READ");
     if (f.IsZombie())
     {
@@ -856,6 +1009,64 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
     tr->SetBranchAddress("NPS.cal.clusX", cX);
     tr->SetBranchStatus("NPS.cal.clusY", 1);
     tr->SetBranchAddress("NPS.cal.clusY", cY);
+
+    // ---- Bind event number (handles g.evnum / evnum / eventnum) ----
+    // NOTE: detect the leaf's type *before* calling SetBranchAddress to avoid ROOT type errors.
+    static bool ev_is_int = false;
+    static bool ev_is_dbl = false;
+    static Int_t ev_i = 0;      // Int_t / UInt_t
+    static Long64_t ev_l = 0;   // Long64_t / ULong64_t
+    static Double_t ev_d = 0.0; // Double_t
+
+    if (!isDummy)
+    {
+        TLeaf *lf = tr->GetLeaf("g.evnum");
+        if (!lf)
+            lf = tr->GetLeaf("evnum");
+        if (!lf)
+            lf = tr->GetLeaf("eventnum");
+
+        if (!lf)
+        {
+            std::cerr << "[bind] ERROR: no evnum leaf (tried g.evnum/evnum/eventnum)\n";
+        }
+        else
+        {
+            const char *lname = lf->GetName();
+            const char *tname = lf->GetTypeName(); // "Int_t","UInt_t","Long64_t","ULong64_t","Double_t", ...
+            tr->SetBranchStatus(lname, 1);
+
+            if (!strcmp(tname, "Int_t") || !strcmp(tname, "UInt_t"))
+            {
+                ev_is_int = true;
+                ev_is_dbl = false;
+                tr->SetBranchAddress(lname, &ev_i);
+            }
+            else if (!strcmp(tname, "Long64_t") || !strcmp(tname, "ULong64_t"))
+            {
+                ev_is_int = false;
+                ev_is_dbl = false;
+                tr->SetBranchAddress(lname, &ev_l);
+            }
+            else if (!strcmp(tname, "Double_t"))
+            {
+                ev_is_int = false;
+                ev_is_dbl = true;
+                tr->SetBranchAddress(lname, &ev_d);
+            }
+            else
+            {
+                std::cerr << "[bind] ERROR: unsupported evnum type: " << tname << "\n";
+            }
+            std::cout << "[bind] event number bound: " << lname << " (" << tname << ")\n";
+        }
+    }
+    else
+    {
+        // Dummy file: skip binding evnum (branch often absent)
+        ev_is_int = ev_is_dbl = false;
+        std::cerr << "[bind] dummy: skipping evnum bind\n";
+    }
 
     // ===== Map→Reduce: per-category tally =====
     // cat: 0=CC, 1=V, 2=H, 3=AD (AA_diag), 4=AP (AA_pure)
@@ -911,8 +1122,6 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
             }
         }
     };
-
-    const bool isDummy = (std::string(tag) == "dummy");
 
     const Long64_t N = tr->GetEntries();
     for (Long64_t ie = 0; ie < N; ++ie)
@@ -1133,31 +1342,34 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     }
                     if (g_hMG_pass)
                         g_hMG_pass->Fill(bestMG, w_sig);
-
-                    // Minimal skim (extend later with 4-vectors/kinematics)
-                    g_skim_eventnum = 0; // TODO: bind actual event id branch when available
-                    g_skim_mgg = bestMG;
-                    g_skim_wsig = w_sig;
-                    g_skim_pass_pi0 = 1;
                     if (g_tSkim)
+                    {
+                        ULong64_t evnum_for_skim =
+                            ev_is_dbl ? (ULong64_t)llround(ev_d) : (ev_is_int ? (ULong64_t)ev_i : (ULong64_t)ev_l);
+
+                        g_skim_eventnum = evnum_for_skim;
+                        g_skim_mgg = bestMG;
+                        g_skim_wsig = w_sig; // store actual signal weight
+                        g_skim_pass_pi0 = 1;
                         g_tSkim->Fill();
+                    }
                 }
             }
+        }
 
-            if (isDummy)
+        if (isDummy)
+        {
+            if (bestYavg >= 0)
             {
-                if (bestYavg >= 0)
-                {
-                    O.hMM_CC_evt_DN.Fill(bestMM);
-                    if (bestMG > 0)
-                        O.hMG_CC_evt_DN.Fill(bestMG);
-                }
-                else
-                {
-                    O.hMM_CC_evt_UP.Fill(bestMM);
-                    if (bestMG > 0)
-                        O.hMG_CC_evt_UP.Fill(bestMG);
-                }
+                O.hMM_CC_evt_DN.Fill(bestMM);
+                if (bestMG > 0)
+                    O.hMG_CC_evt_DN.Fill(bestMG);
+            }
+            else
+            {
+                O.hMM_CC_evt_UP.Fill(bestMM);
+                if (bestMG > 0)
+                    O.hMG_CC_evt_UP.Fill(bestMG);
             }
         }
     }
@@ -1371,6 +1583,22 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
     OUT.hMG_Sub.Add(&hCC_mg, 1.0);
     OUT.hMG_Sub.Add(&OUT.hMG_Best, -1.0);
 
+    // >>> build ±nsig window from the final (data−acc−dummy) mγγ <<<
+    BuildMggWindow_Bernstein(&OUT.hMG_Sub, g_MGW.order, g_MGW.rebin);
+
+    // Optional: quick print so you see what window was derived
+    if (g_MGW.ok)
+    {
+        std::cout << "[mgg-window] mu=" << g_MGW.mu
+                  << "  sigma=" << g_MGW.sigma
+                  << "  nsig=" << g_MGW.nsig
+                  << "  window=[" << g_MGW.lo << "," << g_MGW.hi << "]\n";
+    }
+    else
+    {
+        std::cerr << "[mgg-window] window not available (fit failed)\n";
+    }
+
     OUT.hMM_CC_afterDummy.Write();
     OUT.hMG_CC_afterDummy.Write();
 
@@ -1407,6 +1635,10 @@ int main(int argc, char **argv)
     TString dummyF = argv[2];
     TString outF = argv[3];
 
+    // --- Open output FIRST so anything that writes has a real file target ---
+    TFile fout(outF, "RECREATE");
+    fout.cd();
+
     double Qdata = 1.0, Qdum = 1.0;
     if (argc >= 5)
         Qdata = atof(argv[4]);
@@ -1417,6 +1649,53 @@ int main(int argc, char **argv)
     // Accept extra flags anywhere after the positional args
     for (int i = 1; i < argc; i++)
     {
+
+        // --- config file (YAML) ---
+        if (!strcmp(argv[i], "--cfg") && i + 1 < argc)
+        {
+            const std::string cfgPath = argv[++i];
+            try
+            {
+                YAML::Node cfg = YAML::LoadFile(cfgPath);
+
+                // mgg-fit settings (defaults already in g_MGW)
+                if (cfg["mgg_fit"])
+                {
+                    auto m = cfg["mgg_fit"];
+                    if (m["mode"])
+                        g_MGW.signal_mode = m["mode"].as<std::string>(); // "gauss"|"doubleG"|"cb"
+                    if (m["order"])
+                        g_MGW.order = m["order"].as<int>(); // Bernstein(k)
+                    if (m["rebin"])
+                        g_MGW.rebin = m["rebin"].as<int>();
+                    if (m["nsig"])
+                        g_MGW.nsig = m["nsig"].as<double>(); // 2 or 3
+                }
+
+                // timing dummy normalization
+                if (cfg["timing"] && cfg["timing"]["kUP"] && cfg["timing"]["kDN"])
+                {
+                    // If you keep kUP_v5/kDN_v5 as constexpr now, switch them to globals to override here.
+                    // e.g., make them `static double kUP_v5 = 8.467, kDN_v5 = 4.256;` at file-scope,
+                    // then:
+                    kUP_v5 = cfg["timing"]["kUP"].as<double>();
+                    kDN_v5 = cfg["timing"]["kDN"].as<double>();
+                }
+
+                // (optional) invariant-mass fit window
+                if (cfg["mgg_fit"] && (cfg["mgg_fit"]["mmin"] || cfg["mgg_fit"]["mmax"]))
+                {
+                    // if you store mmin/mmax in your code, capture them from YAML here
+                    // (define two globals or locals that your fit block will read)
+                }
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "[cfg] FAILED to load " << cfgPath << " : " << e.what() << "\n";
+            }
+            continue;
+        }
+
         if (!strcmp(argv[i], "--bin-schema") && i + 1 < argc)
         {
             MR_schema_path = argv[++i];
@@ -1464,23 +1743,51 @@ int main(int argc, char **argv)
     const std::string mgg_json_sidecar = "mgg_roofit_sb.json";
     const std::string mgg_root_sidecar = "fit_mgg_roofit_out.root";
 
-    g_MGW = load_mgg_window_from_json(mgg_json_sidecar, 2.0);
-    if (!g_MGW.ok)
+    // --- mgg window from JSON sidecar (preserve YAML-set nsig) ---
     {
-        std::cerr << "[mgg-cut] WARN: cannot read " << mgg_json_sidecar
-                  << " — fallback mu=0.135 sigma=0.006 (±2σ)\n";
-        g_MGW.ok = true;
-        g_MGW.mu = 0.135;
-        g_MGW.sigma = 0.006;
-        g_MGW.lo = g_MGW.mu - 2.0 * g_MGW.sigma;
-        g_MGW.hi = g_MGW.mu + 2.0 * g_MGW.sigma;
-    }
-    std::cout << std::fixed << std::setprecision(6)
-              << "[mgg-cut] mu=" << g_MGW.mu << "  sigma=" << g_MGW.sigma
-              << "  window=[" << g_MGW.lo << "," << g_MGW.hi << "]"
-              << "  (mode=" << g_MGW.signal_mode << ", ord=" << g_MGW.order
-              << ", rebin=" << g_MGW.rebin << ")\n";
+        auto tmp = load_mgg_window_from_json(mgg_json_sidecar, g_MGW.nsig); // returns MggWindow (not MGW)
+        if (tmp.ok)
+        {
+            // copy common fields
+            g_MGW.ok = true;
+            g_MGW.mu = tmp.mu;
+            g_MGW.sigma = tmp.sigma;
 
+            // prefer explicit lo/hi from sidecar if present/non-degenerate; otherwise compute from mu, sigma, nsig
+            bool have_lohi = (tmp.hi > tmp.lo) && std::isfinite(tmp.lo) && std::isfinite(tmp.hi);
+            if (have_lohi)
+            {
+                g_MGW.lo = tmp.lo;
+                g_MGW.hi = tmp.hi;
+            }
+            else
+            {
+                g_MGW.lo = g_MGW.mu - g_MGW.nsig * g_MGW.sigma;
+                g_MGW.hi = g_MGW.mu + g_MGW.nsig * g_MGW.sigma;
+            }
+        }
+        else
+        {
+            std::cerr << "[mgg-cut] WARN: cannot read " << mgg_json_sidecar
+                      << " — fallback mu=0.135 sigma=0.006 (±" << g_MGW.nsig << "σ)\n";
+            g_MGW.ok = true;
+            g_MGW.mu = 0.135;
+            g_MGW.sigma = 0.006;
+            g_MGW.lo = g_MGW.mu - g_MGW.nsig * g_MGW.sigma;
+            g_MGW.hi = g_MGW.mu + g_MGW.nsig * g_MGW.sigma;
+        }
+
+        // status line
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[mgg-cut] mu=" << g_MGW.mu << "  sigma=" << g_MGW.sigma
+                  << "  window=[" << g_MGW.lo << "," << g_MGW.hi << "]"
+                  << "  (mode=" << g_MGW.signal_mode
+                  << ", ord=" << g_MGW.order
+                  << ", rebin=" << g_MGW.rebin
+                  << ", nsig=" << g_MGW.nsig << ")\n";
+    }
+
+    // weights (unchanged)
     g_MGWts = load_mgg_weights(mgg_root_sidecar);
     if (!g_MGWts.ok())
     {
@@ -1488,24 +1795,19 @@ int main(int argc, char **argv)
                   << " — using w_sig=1 for passes.\n";
     }
 
-    // Book a “passed 2σ (weighted)” QA hist with your global mg binning
+    // Book a “passed ±nsig (weighted)” QA hist with your global mγγ binning
     if (!g_hMG_pass)
     {
-        g_hMG_pass = new TH1D("hMG_CC_evt_pass_2sigma", "m_{#gamma#gamma} passed 2#sigma (weighted);M_{#gamma#gamma} (GeV);Counts",
-                              nMG, mgLo, mgHi);
-        g_hMG_pass->SetDirectory(nullptr);
+        g_hMG_pass = new TH1D(
+            "hMG_CC_evt_pass_nsig", // name: no hard-coded “2sigma”
+            Form("m_{#gamma#gamma} passed #pm%.1f#sigma (weighted);M_{#gamma#gamma} (GeV);Counts",
+                 g_MGW.nsig), // title reflects current nsig
+            nMG, mgLo, mgHi);
+        g_hMG_pass->SetDirectory(nullptr); // memory-resident is OK; you already call g_hMG_pass->Write() later
     }
 
-    Pack D("data");
-    fillFromFile(dataF, "data", D);
-    Pack M("dummy");
-    fillFromFile(dummyF, "dummy", M);
-
-    // --- Open output FIRST so anything that writes has a real file target ---
-    TFile fout(outF, "RECREATE");
-    fout.cd();
-
     // --- CREATE & ATTACH SKIM TREE HERE (before any filling) ---
+    fout.cd();
     g_tSkim = new TTree("Skim", "Skim (pi0 2sigma)");
     g_tSkim->SetDirectory(&fout);           // <-- critical: make it file-resident
     g_tSkim->SetAutoSave(10 * 1024 * 1024); // optional QoL
@@ -1523,7 +1825,14 @@ int main(int argc, char **argv)
     g_tSkim->Branch("w_sig", &g_skim_wsig, "w_sig/D");
     g_tSkim->Branch("pass_pi0", &g_skim_pass_pi0, "pass_pi0/I");
 
+    // ---- Now run event loops (data and dummy) ----
+    Pack D("data");
+    fillFromFile(dataF, "data", D);
+    Pack M("dummy");
+    fillFromFile(dummyF, "dummy", M);
+
     // Do dummy-first then Option-A for both MM and Mgg
+    fout.cd();
     Pack OUT("final");
     doDummyThenA(D, M, Qdata, Qdum, kUP_v5, kDN_v5, OUT);
 
@@ -1847,7 +2156,7 @@ int main(int argc, char **argv)
         leg->AddEntry(&OUT.hMG_Best, "Mgg B_{est} (after dummy)", "l");
         leg->AddEntry(&OUT.hMG_Sub, "Mgg Final SUB", "l");
         leg->Draw();
-        std::cerr << "[doDummyThenA] wrote MM_overlay_final\n";
+        std::cerr << "[doDummyThenA] wrote Mgg_overlay_final\n";
 
         c.Write("Mgg_overlay_final");
         // --- write diagnostics added earlier at file scope ---
