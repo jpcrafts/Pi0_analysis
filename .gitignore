@@ -1,18 +1,110 @@
-# Ignore object files and executables
+# ------------------------------------------------------------------------------
+# General
+# ------------------------------------------------------------------------------
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ------------------------------------------------------------------------------
+# CMake + Build Directory
+# ------------------------------------------------------------------------------
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+CTestCustom.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# ------------------------------------------------------------------------------
+# Compiled C/C++ Objects & Libraries
+# ------------------------------------------------------------------------------
 *.o
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.obj
+*.lib
 *.exe
+
+# ------------------------------------------------------------------------------
+# Generic Executables (ELF executables via pattern)
+# ------------------------------------------------------------------------------
+# If it has no extension and is executable, ignore it.
+# Prevents committing compiled binaries from ROOT or g++
+[!.]*
+
+# But DO allow source files
+!*.c
+!*.cc
+!*.cpp
+!*.cxx
+!*.h
+!*.hh
+!*.hpp
+
+# ------------------------------------------------------------------------------
+# ROOT Files & Auto-Generated Artifacts
+# ------------------------------------------------------------------------------
+*.root
+*.pcm
+*.d
+*.def
+*.so.rootmap
+*.rootmap
+*.ttf
+
+# ------------------------------------------------------------------------------
+# Logs, Temp Files, Reports
+# ------------------------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.old
+
+# ------------------------------------------------------------------------------
+# Python/Notebooks (common in analysis dirs)
+# ------------------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.ipynb_checkpoints/
+
+# ------------------------------------------------------------------------------
+# Container / Dev Tools
+# ------------------------------------------------------------------------------
+.cache/
+.env
+*.tar
+*.tar.gz
+
+# ------------------------------------------------------------------------------
+# Editor/IDE
+# ------------------------------------------------------------------------------
+.vscode/
+.vscode.bak
+.clangd/
+.clang-format
+.clang-tidy
+.idea/
+
+# Ignore Fortran files
 *.f
 
-# Ignore the 'blocktimes' directory & ROOTfiles symlink
+# Ignore the 'blocktimes' directory & symlinks
 blocktimes/
 ROOTfiles
 Plots
 VolatileROOTfiles
 old_scripts/
-.vscode.bak
-# Ignore backup or temporary files
-*~
-.*.swp
 
 # Ignore the grep_rvardef
 grep_rvardef_variables_output.txt
