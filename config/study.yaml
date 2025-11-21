@@ -1,0 +1,79 @@
+# =========================
+#  π0 v5-slim: study config
+# =========================
+meta:
+  name: "x58_q51_p5"
+  notes: "Study settings for this kinematic; Q_data/Q_dummy come from CLI."
+  version: 1
+
+paths:
+  # Optional: if omitted, program uses compiled-in defaults or CLI args
+  bin_schema_file: "bins_MxCorr_Mgg.root"   # reporting bins (MxCorr × Mgg)
+  # side products written by the program for provenance:
+  write_fit_artifacts: true                 # write hW_sig, mu/sigma/nsig into output ROOT
+
+fit:
+  model: "SplusB"         # internal RooFit: Gaussian (signal) + Chebyshev background
+  nsig: 3.0               # half-width for mγγ window; can be overridden by --nsig
+
+  mgg:
+    mu:    0.131101
+    sigma: 0.005338
+    rebin: 3
+    bkg:
+      type: "bernstein"   # was: chebyshev
+      order: 2            # k (adjust per your study)
+    freeze: ["mu","sigma"]  # keep study μ,σ fixed; fit nS/nB and bkg coeffs
+
+cuts:
+  # HMS (example values; tune per study)
+  hms:
+    dp:   [-0.04, 0.06]
+    beta: [0.80, 1.20]
+    th:   [-0.06, 0.06]
+    ph:   [-0.06, 0.06]
+
+  # coincidence-time window in ns (example)
+  coincidence_t:
+    lo: -1.0
+    hi:  1.0
+
+  # mγγ selection policy used for pass flag; typically mirrors fit.nsig
+  mgg_window:
+    mode: "nsig"          # "nsig" or "absolute"
+    nsig: 3.0             # if present, overrides fit.nsig for the pass flag
+    # absolute:
+    #   lo: 0.120
+    #   hi: 0.142
+
+normalization:
+  # NOTE: Q_data and Q_dummy come from CLI (positional args).
+  # Only the dummy UP/DN scaling lives here.
+  dummy_scale:
+    kUP: 8.467
+    kDN: 4.256
+
+target_density:
+  # Optional per-target segment density corrections (unitless scale factors)
+  upstream:   1.000
+  downstream: 1.000
+
+binning:
+  # If you prefer to embed edges instead of using a file, uncomment below.
+  # MxCorr_edges: [0.00, 0.50, 1.00, 1.50, 2.00]
+  # Mgg_edges:    [0.10, 0.12, 0.135, 0.150, 0.180, 0.200]
+  # Program will prefer bin_schema_file if both are provided.
+  allow_schema_fallback: true   # if file missing, fall back to inline edges (if provided)
+
+toggles:
+  auto_fit: true        # run S+B fit inside v5 (one-pass pipeline)
+  write_micro: true     # write mergeable Micro tree with per-event weights
+  clamp_purity: true    # clamp hW_sig (S/D) to [0,1] for numerical safety
+  warn_if_window_out_of_range: true
+  print_config_summary: true
+
+provenance:
+  # Optional “freeze” of analysis knobs for audits; program can echo this into the ROOT file
+  lock_hash_components:
+    include_env: true   # include ROOT version, compile flags, etc. in config hash
+    include_bins: true  # include bin schema ID/edges in config hash

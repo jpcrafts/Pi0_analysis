@@ -89,12 +89,19 @@ struct MGW
     double sigma = 0.0;
     double lo = 0.0;
     double hi = 0.0;
-    double nsig = 2.0; // default: 2σ window
+    double nsig = 3.0; // default: 2σ window
 
     // Added to support YAML-configurable fit:
     int order = 2;                     // Bernstein(k) order
-    int rebin = 1;                     // histogram rebin factor
+    int rebin = 3;                     // histogram rebin factor
     std::string signal_mode = "gauss"; // "gauss" | "doubleG" | "cb"
+
+    // --- Added for S+B RooFit diagnostics and event-level signal weights ---
+    double nS_total = 0.0; // fitted total signal yield
+    double nB_total = 0.0; // fitted total background yield
+    double S_window = 0.0; // signal within ±nsig window
+    double B_window = 0.0; // background within ±nsig window
+    std::vector<double> Sfrac_bins; // per-bin S/(S+B) fractions
 } g_MGW;
 
 // ======= [ADD] simple PDF bin integral helper =======
@@ -401,6 +408,43 @@ static void BuildMggWindow_Bernstein(TH1 *hFinal_mgg, int bern_order, int rebin_
     g_MGW.hi = g_MGW.mu + g_MGW.nsig * g_MGW.sigma;
     g_MGW.ok = true;
 
+    // commit μ, σ, window from your configured nsig
+    g_MGW.mu = mu.getVal();
+    g_MGW.sigma = sg.getVal();
+    g_MGW.lo = g_MGW.mu - g_MGW.nsig * g_MGW.sigma;
+    g_MGW.hi = g_MGW.mu + g_MGW.nsig * g_MGW.sigma;
+    g_MGW.ok = true;
+
+    // --- NEW: per-bin S and B yields and S/(S+B) fractions ---
+    const int nbins = hFinal_mgg->GetNbinsX();
+
+    g_MGW.Sfrac_bins.assign(nbins + 1, 0.0); // indices 1..nbins
+    g_MGW.nS_total = nS.getVal();
+    g_MGW.nB_total = nB.getVal();
+    g_MGW.S_window = 0.0;
+    g_MGW.B_window = 0.0;
+
+    for (int ib = 1; ib <= nbins; ++ib)
+    {
+        const double xlo = hFinal_mgg->GetXaxis()->GetBinLowEdge(ib);
+        const double xhi = hFinal_mgg->GetXaxis()->GetBinUpEdge(ib);
+
+        const double Sj = pdfYieldInBin(gaus, m, xlo, xhi, g_MGW.nS_total);
+        const double Bj = pdfYieldInBin(bkg,  m, xlo, xhi, g_MGW.nB_total);
+        const double denom = Sj + Bj;
+
+        const double fracS = (denom > 0.0) ? (Sj / denom) : 0.0;
+        g_MGW.Sfrac_bins[ib] = fracS;
+
+        // optional, if you want total S/B in the ±nsig window
+        if (xhi >= g_MGW.lo && xlo <= g_MGW.hi)
+        {
+            g_MGW.S_window += Sj;
+            g_MGW.B_window += Bj;
+        }
+    }
+
+
     // provenance (optional)
     TTree *tCut = new TTree("MggCut", "MggCut");
     double mu_out = g_MGW.mu, sg_out = g_MGW.sigma, lo_out = g_MGW.lo, hi_out = g_MGW.hi, ns = g_MGW.nsig;
@@ -485,7 +529,7 @@ static std::string parse_json_string(const std::string &s, const char *key, cons
     return s.substr(p + 1, q - (p + 1));
 }
 
-static MggWindow load_mgg_window_from_json(const std::string &json_path, double nsig = 2.0)
+static MggWindow load_mgg_window_from_json(const std::string &json_path, double nsig = 3.0)
 {
     MggWindow w;
     w.nsig = nsig;
@@ -1583,7 +1627,9 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
     OUT.hMG_Sub.Add(&hCC_mg, 1.0);
     OUT.hMG_Sub.Add(&OUT.hMG_Best, -1.0);
 
-    // >>> build ±nsig window from the final (data−acc−dummy) mγγ <<<
+#endif
+
+ // >>> build ±nsig window from the final (data−acc−dummy) mγγ <<<
     BuildMggWindow_Bernstein(&OUT.hMG_Sub, g_MGW.order, g_MGW.rebin);
 
     // Optional: quick print so you see what window was derived
@@ -1602,7 +1648,6 @@ static void doDummyThenA(const Pack &D, const Pack &M, double Qdata, double Qdum
     OUT.hMM_CC_afterDummy.Write();
     OUT.hMG_CC_afterDummy.Write();
 
-#endif
     // Optionally write after-dummy categories for QA
     hCC_mm.SetName("hMM_CC_afterDummy");
     hV_mm.SetName("hMM_V_afterDummy");
@@ -1808,10 +1853,11 @@ int main(int argc, char **argv)
 
     // --- CREATE & ATTACH SKIM TREE HERE (before any filling) ---
     fout.cd();
+    // --- CREATE SKIM TREE (pi0 2sigma) IN MEMORY ---
     g_tSkim = new TTree("Skim", "Skim (pi0 2sigma)");
-    g_tSkim->SetDirectory(&fout);           // <-- critical: make it file-resident
-    g_tSkim->SetAutoSave(10 * 1024 * 1024); // optional QoL
-    g_tSkim->SetAutoFlush(10000);           // optional QoL
+    g_tSkim->SetDirectory(nullptr); // keep it in memory; we'll rebuild a final Skim at the end
+    g_tSkim->SetAutoSave(0);        // no autosave needed
+    g_tSkim->SetAutoFlush(0);
 
     // branch backing variables (init once)
     g_skim_eventnum = 0;
@@ -2159,14 +2205,109 @@ int main(int argc, char **argv)
         std::cerr << "[doDummyThenA] wrote Mgg_overlay_final\n";
 
         c.Write("Mgg_overlay_final");
+
+        // Persist the final Mgg B_est and SUB histograms for QA / downstream checks
+        fout.cd();
+        OUT.hMG_Best.Write(); // name is like hMG_Best_final
+        OUT.hMG_Sub.Write();  // name is like hMG_Sub_final
+
         // --- write diagnostics added earlier at file scope ---
         fout.cd();
         hDeltaM_vs_CorrFac.Write();
         hMxCorr_vs_MxRaw.Write();
         if (g_hMG_pass)
             g_hMG_pass->Write(); // QA hist (optional)
-        if (g_tSkim)
-            g_tSkim->Write(); // <-- PUT THIS HERE
+
+        // --- Build final Skim tree with per-event physics weights ---
+        if (g_tSkim && g_hMG_pass)
+        {
+            // hSub: final Mgg after dummy + Option-A (already charge-normalized)
+            TH1 *hSub = &OUT.hMG_Sub;
+            TH1 *hPass = g_hMG_pass; // mgg of passing events, weighted by w_sig
+
+            const int nbins = hSub->GetNbinsX();
+            std::vector<double> s_dummyA(nbins + 1, 0.0); // indices 1..nbins
+
+            // Per-bin scaling so that sum_i w_phys_i in bin j = hSub(j)
+            for (int ib = 1; ib <= nbins; ++ib)
+            {
+                const double num = hSub->GetBinContent(ib);
+                const double den = hPass->GetBinContent(ib);
+                s_dummyA[ib] = (den > 0.0) ? (num / den) : 0.0;
+            }
+
+            // Input skim: eventnum, mgg, w_sig, pass_pi0
+            Long64_t in_evnum = 0;
+            double in_mgg = 0.0;
+            double in_wsig = 0.0;
+            int in_pass = 0;
+
+            g_tSkim->SetBranchStatus("*", 0);
+            g_tSkim->SetBranchStatus("eventnum", 1);
+            g_tSkim->SetBranchStatus("mgg", 1);
+            g_tSkim->SetBranchStatus("w_sig", 1);
+            g_tSkim->SetBranchStatus("pass_pi0", 1);
+
+            g_tSkim->SetBranchAddress("eventnum", &in_evnum);
+            g_tSkim->SetBranchAddress("mgg", &in_mgg);
+            g_tSkim->SetBranchAddress("w_sig", &in_wsig);
+            g_tSkim->SetBranchAddress("pass_pi0", &in_pass);
+
+            // Output skim written to the file: adds w_phys
+            TTree *tSkimOut = new TTree("Skim", "Skim (pi0 2sigma, dummy+OptionA physics weights)");
+            tSkimOut->SetDirectory(&fout);
+
+            Long64_t out_evnum = 0;
+            double out_mgg = 0.0;
+            double out_wsig = 0.0;
+            double out_wphys = 0.0;
+            int out_pass = 0;
+            double out_wsignal = 0.0;
+
+            tSkimOut->Branch("eventnum", &out_evnum, "eventnum/l");
+            tSkimOut->Branch("mgg", &out_mgg, "mgg/D");
+            tSkimOut->Branch("w_sig", &out_wsig, "w_sig/D");
+            tSkimOut->Branch("w_phys", &out_wphys, "w_phys/D");
+            tSkimOut->Branch("pass_pi0", &out_pass, "pass_pi0/I");
+            tSkimOut->Branch("w_signal", &out_wsignal, "w_signal/D");
+
+            const Long64_t nentries = g_tSkim->GetEntries();
+            for (Long64_t i = 0; i < nentries; ++i)
+            {
+                g_tSkim->GetEntry(i);
+
+                out_evnum = in_evnum;
+                out_mgg = in_mgg;
+                out_wsig = in_wsig;
+                out_pass = in_pass;
+
+                // Map mgg to Mgg bin in OUT.hMG_Sub
+                int ib = hSub->GetXaxis()->FindBin(in_mgg);
+                if (ib < 1)
+                    ib = 1;
+                if (ib > nbins)
+                    ib = nbins;
+
+                const double sDA = s_dummyA[ib];
+                out_wphys = out_wsig * sDA; // per-event physics weight: dummy+Option-A applied
+
+                const double fracS = (ib < (int)g_MGW.Sfrac_bins.size())
+                                         ? g_MGW.Sfrac_bins[ib]
+                                         : 0.0;
+
+                out_wsignal = out_wphys * fracS; // final S+B–weighted signal-only weight
+
+                tSkimOut->Fill();
+            }
+
+            tSkimOut->Write("", TObject::kOverwrite);
+        }
+        else if (g_tSkim)
+        {
+            // Fallback: if QA hist is missing, at least persist the raw skim
+            g_tSkim->SetDirectory(&fout);
+            g_tSkim->Write();
+        }
     }
 
     // ───────────── 2D timing map with region boxes (DATA pairs; CC not subtracted) ─────────────
