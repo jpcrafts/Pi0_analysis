@@ -11,7 +11,8 @@
 //   8) Produce simple overlay canvases
 //
 // Usage:
-//   g++ -O0 -g -std=c++17 -o Pi_0_v5_slim_pairsA Pi_0_v5_slim_pairsA.cxx alglib_src/*.cpp -I. -Ialglib_src `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit
+//   g++ -O0 -g -std=c++17 -o Pi_0_v5_slim_pairsA ./Pi_0_production.cxx -lyaml-cpp \
+//     `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit
 //   ./Pi0_end2end data.root dummy.root out.root [Qdata] [Qdummy]
 //   ./Pi_0_v5_slim /cache/hallc/c-nps/analysis/pass2/replays/production/nps_hms_coin_4205_0_1_-1.root VolatileROOTfiles/dummy_x58_q51_p5_merged.root 4205_v5_slim.root 29446.282 254792.874
 //

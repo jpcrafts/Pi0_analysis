@@ -15,7 +15,7 @@
     ./dummy_debug VolatileROOTfiles/dummy_x58_q51_p5_merged.root 254792.874
 
   Compile example:
-    g++ -O2 -std=c++17 -o dummy_debug dummy_debug.cpp `root-config --cflags --libs`
+    g++ -O2 -std=c++17 -o dummy_debug ./studies/dummy_debug.cxx `root-config --cflags --libs`
 *************************************************************/
 
 #include <TFile.h>

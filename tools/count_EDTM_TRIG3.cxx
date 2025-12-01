@@ -6,8 +6,8 @@
  *     – both simultaneously
  *
  *  Compile:
- *    g++ -std=c++17 -O2 -Wall count_EDTM_TRIG3.cxx \
- *        $(root-config --cflags --libs) -o count_EDTM_TRIG3
+ *    g++ -std=c++17 -O2 -Wall ./tools/count_EDTM_TRIG3.cxx \
+ *      $(root-config --cflags --libs) -o count_EDTM_TRIG3
  *
  *  Run with default filename pattern:
  *    ./count_EDTM_TRIG3 2093

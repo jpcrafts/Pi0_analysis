@@ -1,3 +1,6 @@
+//   g++ -std=c++17 -O2 -Wall ./tools/FitCombined.cxx \
+//     $(root-config --cflags --libs) -o FitCombined
+
 #include <iostream>
 #include <string>
 #include <cstdlib> // for std::stod

@@ -1,3 +1,6 @@
+//   g++ -std=c++17 -O2 -Wall ./tools/analyzeDiffTime.cxx $(root-config --cflags --libs)
+//     -o analyzeDiffTime
+ 
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>   // for atoi/atol

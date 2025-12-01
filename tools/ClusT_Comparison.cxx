@@ -1,5 +1,8 @@
 // ClusT_Comparison.cxx
 //
+//   g++ -std=c++17 -O2 -Wall ./tools/ClusT_Comparison.cxx \
+//     $(root-config --cflags --libs) -o ClusT_Comparison
+//
 // This program reads a slimmed ROOT file containing NPS replay data with the following branches:
 //   - NPS.cal.clusT      : Raw cluster times
 //   - NPS.cal.newEWClusT : Energy-weighted new cluster times
@@ -177,7 +180,11 @@ void compareClusT(const char* inputFileName, const char* outputPNG) {
   c->Update();
   
   // Create output directory "Plots" if it doesn't exist.
-  system("mkdir -p Plots");
+  // Likely used std::filesystem in c++17
+  int ret = system("mkdir -p Plots");
+  if (ret != 0) {
+    std::cerr << "Warning: mkdir command failed!" << std::endl;
+  }
   
   // Extract run number from inputFileName.
   TString runStr(inputFileName);

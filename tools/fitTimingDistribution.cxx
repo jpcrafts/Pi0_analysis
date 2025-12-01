@@ -199,7 +199,11 @@ void fitTimingDistribution(const char *inputFileName, const char *outputPNG)
   c->Update();
 
   // Create output directory "/Plots/bkgnd_plots" if needed.
-  system("mkdir -p Plots/bkgnd_plots");
+  // Likely used std::filesystem in c++17
+  int ret = system("mkdir -p Plots/bkgnd_plots");
+  if (ret != 0) {
+    std::cerr << "Warning: mkdir command failed!" << std::endl;
+  }
 
   // Generate output PNG filename from the input file name.
   TString runStr(inputFileName);

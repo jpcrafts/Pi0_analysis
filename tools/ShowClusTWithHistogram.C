@@ -1,3 +1,6 @@
+//   g++ -O0 -g -std=c++17 -o ShowClusTWithHistogram ./tools/ShowClusTWithHistogram.C -l
+//     yaml-cpp `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit
+
 #include <iostream>
 #include <TFile.h>
 #include <TTree.h>

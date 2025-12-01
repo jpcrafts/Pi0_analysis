@@ -4,8 +4,8 @@
  *  (No charge‑norm, no CPU‑live‑time, no EDTM subtraction.)
  *
  *  Compile:
- *    g++ -std=c++17 -O2 -Wall scan_scaler_timeSeries.cxx \
- *        $(root-config --cflags --libs) -o scan_scaler_timeSeries
+ *    g++ -std=c++17 -O2 -Wall ./tools/scan_scaler_timeSeries.cxx \
+ *       $(root-config --cflags --libs) -o scan_scaler_timeSeries
  *
  *  Run (uses default directory & filename pattern below):
  *    ./scan_scaler_timeSeries 2093
