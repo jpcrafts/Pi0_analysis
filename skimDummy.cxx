@@ -1,3 +1,5 @@
+//   g++ -std=c++17 -O2     ./skimDummy.cxx -lyaml-cpp     `root-config --cflags --libs` -o skimDummy
+
 #include <TFile.h>
 #include <TTree.h>
 #include <TSystem.h> // for gSystem->AccessPathName
