@@ -12,6 +12,11 @@
 #include <TCanvas.h>
 #include <TMath.h>
 
+//
+//   g++ -std=c++17 -O2     ./Simc_import_take5.cxx -lyaml-cpp     `root-config --cflags
+//     --libs` -lTMVA -lRooFitCore -lRooFit    -o Simc_import_take5
+//
+
 // ==== Constants for kin23 (update as needed for each kinematic) ====
 const double M_p        = 0.938272;   // Proton mass (GeV)
 const double m_e        = 0.000511;   // Electron mass (GeV)

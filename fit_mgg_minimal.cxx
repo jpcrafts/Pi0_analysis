@@ -23,6 +23,11 @@
 //   hSub  : data - bkg (in [fit_min, fit_max])
 //   fGaus : Gaussian fit to residual
 //   plus two PNGs: mgg_bkgfit.png, mgg_sub_gauss.png
+//
+//   g++ -std=c++17 fit_mgg_minimal_sb.C     -lyaml-cpp \
+//    `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit -lRIO \
+//    -o fit_mgg_minimal
+//
 
 #include <TFile.h>
 #include <TDirectory.h>
@@ -41,6 +46,8 @@
 #include <memory>
 #include <vector>
 #include <string>
+
+#include <yaml-cpp/yaml.h>
 
 static TH1* fetchHist(TFile* f, const std::string& path) {
   if (!f) return nullptr;
@@ -273,4 +280,60 @@ void fit_mgg_minimal(const char* infile,
     fout->Write();
     fout->Close();
   }
+}
+
+// -------------------------------------------------------------
+//  YAML-CPP driver
+// -------------------------------------------------------------
+int main(int argc, char** argv)
+{
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] 
+                  << " config.yaml\n";
+        return 1;
+    }
+
+    std::string yamlfile = argv[1];
+
+    YAML::Node cfg;
+    try {
+        cfg = YAML::LoadFile(yamlfile);
+    } catch (const YAML::Exception& e) {
+        std::cerr << "Error reading YAML config: " 
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // Required
+    std::string infile  = cfg["infile"].as<std::string>();
+    std::string histpath = cfg["histpath"].as<std::string>();
+
+    // Fit range
+    double fit_min = cfg["fit_range"]["min"].as<double>();
+    double fit_max = cfg["fit_range"]["max"].as<double>();
+
+    // Sidebands
+    double sbL1 = cfg["sidebands"]["left"]["min"].as<double>();
+    double sbL2 = cfg["sidebands"]["left"]["max"].as<double>();
+    double sbR1 = cfg["sidebands"]["right"]["min"].as<double>();
+    double sbR2 = cfg["sidebands"]["right"]["max"].as<double>();
+
+    // Background polynomial order
+    int bkg_order = cfg["background_order"].as<int>();
+
+    // Save QA plots?
+    bool saveQA = cfg["save_QA"].as<bool>();
+
+    // ---------------------------------------------------------
+    //  Run the user function (no changes needed)
+    // ---------------------------------------------------------
+    fit_mgg_minimal(infile.c_str(),
+                    histpath.c_str(),
+                    fit_min, fit_max,
+                    sbL1, sbL2,
+                    sbR1, sbR2,
+                    bkg_order,
+                    saveQA);
+
+    return 0;
 }

@@ -1,6 +1,9 @@
 #include "TFile.h"
 #include "TVectorD.h"
 #include <vector>
+#include <iostream>
+
+//   g++ -std=c++17 -O2 ./make_bins_schema_MxCorr_Mgg.C `root-config --cflags --libs`     -o make_bins_schema_MxCorr_Mgg
 
 void make_bins_schema_MxCorr_Mgg(const char* out="bins_MxCorr_Mgg.root") {
   TFile f(out,"RECREATE");
@@ -17,4 +20,22 @@ void make_bins_schema_MxCorr_Mgg(const char* out="bins_MxCorr_Mgg.root") {
   vmg.Write("Mgg");
   f.Close();
   printf("Wrote %s with BinEdges/{MxCorr,Mgg}\n", out);
+}
+
+// -------------------------------------------------------------
+//  Minimal CLI driver
+// -------------------------------------------------------------
+int main(int argc, char** argv)
+{
+    const char* outfile = "bins_MxCorr_Mgg.root";
+
+    if (argc == 2) {
+        outfile = argv[1];
+    } else if (argc > 2) {
+        std::cerr << "Usage: " << argv[0] << " [output.root]\n";
+        return 1;
+    }
+
+    make_bins_schema_MxCorr_Mgg(outfile);
+    return 0;
 }

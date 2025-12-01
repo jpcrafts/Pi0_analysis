@@ -11,6 +11,9 @@
 //   fit_mgg_roofit_out.root : RooFitResult, RooPlot, chosen model snapshot
 //   mgg_roofit_sb.png       : plot with data/model/components
 //   mgg_roofit_sb.json      : μ, σ (or σ_eff / CB σ), Ns/Nb, order, AICc, χ²/ndf, etc.
+//
+//   g++ -std=c++17 -O2     fit_mgg_roofit_sb.C     -lyaml-cpp     `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit    -o fit_mgg_roofit_sb
+//
 
 #include <TFile.h>
 #include <TH1.h>
@@ -45,6 +48,9 @@
 #include <iomanip>
 #include <vector>
 #include <string>
+
+#include <yaml-cpp/yaml.h>
+
 using namespace RooFit;
 
 static TH1 *fetchHist(TFile *f, const std::string &path)
@@ -574,4 +580,62 @@ void fit_mgg_roofit_sb(const char *infile,
     delete best.res;
     delete best.model;
     delete best.frame;
+}
+
+// -------------------------------------------------------------
+// YAML DRIVER
+// -------------------------------------------------------------
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] 
+                  << " config.yaml\n";
+        return 1;
+    }
+
+    YAML::Node cfg;
+    try {
+        cfg = YAML::LoadFile(argv[1]);
+    } catch (const YAML::Exception &e) {
+        std::cerr << "Failed to load YAML: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Required parameters
+    std::string infile  = cfg["infile"].as<std::string>();
+    std::string histpath = cfg["histpath"].as<std::string>();
+
+    // Fit range (maps naturally to mmin, mmax)
+    double mmin = cfg["fit_range"]["min"].as<double>();
+    double mmax = cfg["fit_range"]["max"].as<double>();
+
+    // Optional / defaulted
+    int bkg_order = cfg["background_order"].as<int>();   // use for ord_min/ord_max
+    bool saveQA = cfg["save_QA"].as<bool>();
+
+    // Additional options
+    std::string signal_mode = "gauss";
+    if (cfg["signal_mode"])
+        signal_mode = cfg["signal_mode"].as<std::string>();
+
+    int rebin = 1;
+    if (cfg["rebin"])
+        rebin = cfg["rebin"].as<int>();
+
+    // ---------------------------------------------------------
+    // Call your analysis function
+    // ---------------------------------------------------------
+    fit_mgg_roofit_sb(
+        infile.c_str(),
+        histpath.c_str(),
+        mmin,
+        mmax,
+        saveQA,
+        bkg_order,  // ord_min
+        bkg_order,  // ord_max (same unless you want a range)
+        signal_mode.c_str(),
+        rebin
+    );
+
+    return 0;
 }

@@ -8,6 +8,26 @@
 #include "TDirectory.h"
 #include "TKey.h"
 
+// g++ -std=c++17 -O0 reduce_bins.C -o reduce_bins `root-config --cflags --libs` -lTMVA -lRooFitCore -lRooFit
+
+#include <string>
+
+/**
+ * @brief Merge per-bin histograms from multiple ROOT files.
+ *
+ * This function:
+ *   - Verifies a consistent schema/config hash across all inputs.
+ *   - Reads the `bins` TTree from each file.
+ *   - Sums weight-related branches per bin ID.
+ *   - Copies the `BinEdges/` directory from the first file.
+ *   - Writes a merged output ROOT file with:
+ *        - bins_merged TTree
+ *        - bin_schema_id (TParameter<std::string>)
+ *        - config_hash   (TParameter<std::string>)
+ *
+ * @param outFile  Path to output ROOT file to create.
+ * @param inputs   List of input ROOT file paths.
+ */
 void reduce_bins(const char* outFile,
                  std::vector<std::string> inputs)
 {
@@ -79,8 +99,9 @@ void reduce_bins(const char* outFile,
   }
   fo.cd();
 
-  TParameter<std::string>("bin_schema_id",schema_id).Write("bin_schema_id");
-  TParameter<std::string>("config_hash",config_id).Write("config_hash");
+  // Change TParameter to TNamed for ROOT >= 6.36 workaround
+  TNamed("bin_schema_id", schema_id.c_str()).Write();
+  TNamed("config_hash",  config_id.c_str()).Write();
 
   for (auto& kv : sumW) {
     bin_id = kv.first;
@@ -96,4 +117,27 @@ void reduce_bins(const char* outFile,
   t.Write();
   fo.Close();
   printf("[reduce] wrote %s with %zu bins\n", outFile, sumW.size());
+}
+
+/**
+ * @brief Command-line driver for reduce_bins()
+ *
+ * Usage:
+ *   ./reduce_bins_driver output.root input1.root input2.root ...
+ */
+int main(int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0]
+                  << " output.root input1.root [input2.root ...]\n";
+        return 1;
+    }
+
+    const char* outFile = argv[1];
+    std::vector<std::string> inputs;
+    for (int i = 2; i < argc; ++i)
+        inputs.emplace_back(argv[i]);
+
+    reduce_bins(outFile, inputs);
+    return 0;
 }
