@@ -9,6 +9,10 @@
         "ShowClusT.C": "cpp",
         "ShowClusTWithHistogram.C": "cpp",
         "ostream": "cpp",
-        "runTimingAnalysis.C": "cpp"
+        "runTimingAnalysis.C": "cpp",
+        "fit_mgg_minimal.C": "cpp",
+        "fit_mgg_roofit_sb.C": "cpp",
+        "make_bins_schema_MxCorr_Mgg.C": "cpp",
+        "reduce_bins.C": "cpp"
     }
 }
