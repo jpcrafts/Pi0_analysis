@@ -1,7 +1,16 @@
 # syntax=docker/dockerfile:1
 
 # Use a ROOT image based on Ubuntu 22.04 (jammy), not the oracular ones
-FROM rootproject/root:6.34.00-ubuntu24.04
+FROM docker.io/rootproject/root:6.34.00-ubuntu24.04
+
+ARG PI0_ANALYSIS_VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.title="Pi0_analysis" \
+    org.opencontainers.image.version="${PI0_ANALYSIS_VERSION}" \
+    org.opencontainers.image.revision="${VCS_REF}" \
+    org.opencontainers.image.created="${BUILD_DATE}"
 
 # Update & install build tools + yaml-cpp
 RUN apt-get update && \

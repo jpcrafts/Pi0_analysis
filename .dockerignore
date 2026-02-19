@@ -1,6 +1,5 @@
 build/
 tmp/
-*.root
 *.png
 *.pdf
 *.log

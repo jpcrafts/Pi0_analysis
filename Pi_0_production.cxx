@@ -136,13 +136,15 @@ static TH2D hMxCorr_vs_MxRaw("hMxCorr_vs_MxRaw",
                              300, 0.0, 3.0);
 
 // ───────────────────────── constants / config ─────────────────────────
-static constexpr double mp = 0.938272081;     // GeV
-static constexpr double e0_nom = 10.54350201; // GeV beam energy (tune per run if needed)
-static constexpr double m_pi0 = 0.1349768;    // GeV (PDG π0 mass)
+static constexpr double mp = 0.938272081;  // GeV
+static constexpr double m_pi0 = 0.1349768; // GeV (PDG π0 mass)
+static constexpr double kElectronMass_GeV = 0.00051099895; // GeV
 
-static constexpr double NPS_theta_deg = -13.43; // deg
-static constexpr double NPS_theta_rad = NPS_theta_deg * M_PI / 180.0;
-static constexpr double NPS_dist_cm = 407.0; // cm
+// Beam energy / NPS geometry are runtime-configurable via --cfg YAML.
+// Defaults below match the previous hard-coded constants.
+static double gEbeam_GeV     = 10.54350201; // GeV
+static double gNPS_theta_deg = -13.43;      // deg
+static double gNPS_dist_cm   = 407.0;       // cm
 
 struct Win
 {
@@ -472,6 +474,7 @@ static std::string MR_compute_config_hash()
        << "CWIN:" << C_LO << "," << C_HI
        << ";SIDES:" << NPOS << "," << NNEG
        << ";UD:" << kUP_v5 << "," << kDN_v5
+       << ";GEO:" << gEbeam_GeV << "," << gNPS_theta_deg << "," << gNPS_dist_cm
        // NOTE: use g_MGW.mu etc. (no parentheses)
        << ";g_MGW:" << g_MGW.mu << "," << g_MGW.sigma << "," << g_MGW.nsig
        << ";MM:" << nMM << "," << mmLo << "," << mmHi
@@ -592,6 +595,19 @@ static double g_skim_mgg = 0.0;
 static double g_skim_wsig = 1.0;
 static int g_skim_pass_pi0 = 0;
 
+// Additional physics variables (filled only for passing DATA events)
+static double g_skim_Q2    = 0.0;
+static double g_skim_W     = 0.0;
+static double g_skim_nu    = 0.0;
+static double g_skim_t     = 0.0;
+static double g_skim_pt    = 0.0;
+static double g_skim_theta = 0.0;
+static double g_skim_phi   = 0.0;
+static double g_skim_xB    = 0.0;
+static double g_skim_z     = 0.0;
+static double g_skim_Mx_raw  = 0.0;
+static double g_skim_Mx_corr = 0.0;
+
 // Fiducial gate (adjust numbers to your full script if needed)
 inline bool goodXY(double x, double y)
 {
@@ -660,8 +676,8 @@ static inline bool computeMM(double E1, double E2,
 {
     // photon directions from (x,y,NPS_dist)
     double px1_h, py1_h, pz1_h, px2_h, py2_h, pz2_h;
-    rotY_passive(x1, y1, NPS_dist_cm, NPS_theta_deg, px1_h, py1_h, pz1_h);
-    rotY_passive(x2, y2, NPS_dist_cm, NPS_theta_deg, px2_h, py2_h, pz2_h);
+    rotY_passive(x1, y1, gNPS_dist_cm, gNPS_theta_deg, px1_h, py1_h, pz1_h);
+    rotY_passive(x2, y2, gNPS_dist_cm, gNPS_theta_deg, px2_h, py2_h, pz2_h);
     const double r1 = std::sqrt(px1_h * px1_h + py1_h * py1_h + pz1_h * pz1_h);
     const double r2 = std::sqrt(px2_h * px2_h + py2_h * py2_h + pz2_h * pz2_h);
     if (!(r1 > 0 && r2 > 0))
@@ -670,8 +686,8 @@ static inline bool computeMM(double E1, double E2,
     const double u2x = px2_h / r2, u2y = py2_h / r2, u2z = pz2_h / r2;
 
     // beam + target-at-rest
-    const double Ein = e0_nom + mp;
-    const double Pinx = 0.0, Piny = 0.0, Pinz = e0_nom;
+    const double Ein = gEbeam_GeV + mp;
+    const double Pinx = 0.0, Piny = 0.0, Pinz = gEbeam_GeV;
 
     // photons (massless)
     const double p1x = E1 * u1x, p1y = E1 * u1y, p1z = E1 * u1z;
@@ -697,7 +713,7 @@ static inline bool computeMgg(double E1, double E2,
     const double dx = (x1 - x2);
     const double dy = (y1 - y2);
     const double d = std::sqrt(dx * dx + dy * dy);
-    const double theta12 = std::atan2(d, NPS_dist_cm);
+    const double theta12 = std::atan2(d, gNPS_dist_cm);
     const double cos12 = std::cos(theta12);
     const double m2 = 2.0 * E1 * E2 * (1.0 - cos12);
     if (!(m2 > 0) || !std::isfinite(m2))
@@ -732,8 +748,8 @@ static inline double MxCorr_Avnish_pair(double mm2,
 
     // --- Photon unit vectors (same geometry as computeMM) ---
     double px1_h, py1_h, pz1_h, px2_h, py2_h, pz2_h;
-    rotY_passive(x1, y1, NPS_dist_cm, NPS_theta_deg, px1_h, py1_h, pz1_h);
-    rotY_passive(x2, y2, NPS_dist_cm, NPS_theta_deg, px2_h, py2_h, pz2_h);
+    rotY_passive(x1, y1, gNPS_dist_cm, gNPS_theta_deg, px1_h, py1_h, pz1_h);
+    rotY_passive(x2, y2, gNPS_dist_cm, gNPS_theta_deg, px2_h, py2_h, pz2_h);
 
     const double r1 = std::sqrt(px1_h * px1_h + py1_h * py1_h + pz1_h * pz1_h);
     const double r2 = std::sqrt(px2_h * px2_h + py2_h * py2_h + pz2_h * pz2_h);
@@ -1175,9 +1191,16 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
         const double t0 = 0.5 * (C_LO + C_HI);
         bool haveBestCC = false;
         double bestScore = 1e99;
-        double bestMM = 0.0;
+
+        // best-pair quantities (CC, closest to center)
+        double bestMM = 0.0;      // corrected (Avnish)
+        double bestMM_raw = 0.0;  // uncorrected
         double bestMG = -1.0;
         double bestYavg = 0.0;
+
+        // best-pair photon kinematics at NPS plane (cm, GeV)
+        double bestE1 = 0.0, bestX1 = 0.0, bestY1 = 0.0;
+        double bestE2 = 0.0, bestX2 = 0.0, bestY2 = 0.0;
 
         tr->GetEntry(ie);
         if (!passHMSCuts(edt, dp, et, npe, th, ph, (int)ncl, cE, cX, cY))
@@ -1196,23 +1219,23 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     continue;
                 const double ti = cT[a], tj = cT[b];
 
-                double mm = 0.0;
-                if (!computeMM(cE[a], cE[b], cX[a], cY[a], cX[b], cY[b], hp, hpx, hpy, hpz, mm))
+                double mm_raw = 0.0;
+                if (!computeMM(cE[a], cE[b], cX[a], cY[a], cX[b], cY[b], hp, hpx, hpy, hpz, mm_raw))
                     continue;
                 double mg = 0.0;
                 (void)computeMgg(cE[a], cE[b], cX[a], cY[a], cX[b], cY[b], mg); // ok if false
                                                                                 // Avnish correction → corrected Mx for this pair
-                double mm_corr = mm;
+                double mm_corr = mm_raw;
                 if (mg > 0.0)
                 {
                     // Ee ≈ hp (ultrarel.), electron components hpx/hpy/hpz are set from branches
-                    mm_corr = MxCorr_Avnish_pair(mm * mm, e0_nom, hp, hpx, hpy, hpz,
+                    mm_corr = MxCorr_Avnish_pair(mm_raw * mm_raw, gEbeam_GeV, hp, hpx, hpy, hpz,
                                                  cE[a], cE[b], cX[a], cY[a], cX[b], cY[b]);
                 }
 
                 // [ADD] global before/after decorrelation views
-                if (mg > 0.0 && mm > 0.0)
-                    O.h2Mx2_vs_mgg_uncorr.Fill(mm * mm, mg);
+                if (mg > 0.0 && mm_raw > 0.0)
+                    O.h2Mx2_vs_mgg_uncorr.Fill(mm_raw * mm_raw, mg);
                 if (mg > 0.0 && mm_corr > 0.0)
                     O.h2Mx2_vs_mgg_corr.Fill(mm_corr * mm_corr, mg);
 
@@ -1228,8 +1251,8 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                 {
                     O.hMM_CC.Fill(mm_corr);
                     // [ADD] CC-only before/after decorrelation views
-                    if (mg > 0.0 && mm > 0.0)
-                        O.h2Mx2_vs_mgg_CC_uncorr.Fill(mm * mm, mg);
+                    if (mg > 0.0 && mm_raw > 0.0)
+                        O.h2Mx2_vs_mgg_CC_uncorr.Fill(mm_raw * mm_raw, mg);
                     if (mg > 0.0 && mm_corr > 0.0)
                         O.h2Mx2_vs_mgg_CC_corr.Fill(mm_corr * mm_corr, mg);
 
@@ -1260,8 +1283,13 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                         haveBestCC = true;
                         bestScore = score;
                         bestMM = mm_corr;
+                        bestMM_raw = mm_raw;
                         bestMG = mg;
                         bestYavg = yavg;
+
+                        // save the best-pair photons (for downstream physics vars / skim)
+                        bestE1 = cE[a]; bestX1 = cX[a]; bestY1 = cY[a];
+                        bestE2 = cE[b]; bestX2 = cX[b]; bestY2 = cY[b];
                     }
                 }
                 else if (isV(ti, tj))
@@ -1387,15 +1415,99 @@ static void fillFromFile(const TString &inF, const char *tag, Pack &O)
                     }
                     if (g_hMG_pass)
                         g_hMG_pass->Fill(bestMG, w_sig);
-                    if (g_tSkim)
+
+                    if (!isDummy && g_tSkim)
                     {
                         ULong64_t evnum_for_skim =
                             ev_is_dbl ? (ULong64_t)llround(ev_d) : (ev_is_int ? (ULong64_t)ev_i : (ULong64_t)ev_l);
 
+                        // basic
                         g_skim_eventnum = evnum_for_skim;
                         g_skim_mgg = bestMG;
                         g_skim_wsig = w_sig; // store actual signal weight
                         g_skim_pass_pi0 = 1;
+
+                        // missing-mass
+                        g_skim_Mx_raw = bestMM_raw;
+                        g_skim_Mx_corr = bestMM;
+
+                        // --- kinematics (DIS-style) ---
+                        const double Ee = std::sqrt(std::max(0.0, hpx*hpx + hpy*hpy + hpz*hpz + kElectronMass_GeV*kElectronMass_GeV));
+                        TLorentzVector k_in(0.0, 0.0, gEbeam_GeV, gEbeam_GeV);
+                        TLorentzVector k_out(hpx, hpy, hpz, Ee);
+                        TLorentzVector q = k_in - k_out;
+
+                        g_skim_Q2 = -q.M2();
+                        if (g_skim_Q2 < 0.0 && std::fabs(g_skim_Q2) < 1e-12) g_skim_Q2 = 0.0;
+                        g_skim_nu = q.E();
+                        const double W2 = mp*mp + 2.0*mp*g_skim_nu - g_skim_Q2;
+                        g_skim_W = (W2 > 0.0) ? std::sqrt(W2) : 0.0;
+
+                        // photons -> pi0 4-vector (hall coords)
+                        auto photon_p3 = [&](double E, double x, double y) -> TVector3 {
+                            double xh=0.0, yh=0.0, zh=0.0;
+                            rotY_passive(x, y, gNPS_dist_cm, gNPS_theta_deg, xh, yh, zh);
+                            TVector3 dir(xh, yh, zh);
+                            const double mag = dir.Mag();
+                            if (mag > 0.0) dir *= (1.0/mag);
+                            return dir * E;
+                        };
+
+                        TVector3 p3_g1 = photon_p3(bestE1, bestX1, bestY1);
+                        TVector3 p3_g2 = photon_p3(bestE2, bestX2, bestY2);
+                        TLorentzVector g1(p3_g1, bestE1);
+                        TLorentzVector g2(p3_g2, bestE2);
+                        TLorentzVector p4_pi0 = g1 + g2;
+
+                        // xB, z
+                        if (g_skim_nu > 0.0)
+                        {
+                            g_skim_xB = g_skim_Q2 / (2.0 * mp * g_skim_nu);
+                            g_skim_z  = p4_pi0.E() / g_skim_nu;
+                        }
+                        else
+                        {
+                            g_skim_xB = 0.0;
+                            g_skim_z  = 0.0;
+                        }
+
+                        // theta, pt (w.r.t. virtual photon direction)
+                        const TVector3 q3 = q.Vect();
+                        const TVector3 p3_pi0 = p4_pi0.Vect();
+                        const double qmag = q3.Mag();
+                        const double pmag = p3_pi0.Mag();
+
+                        g_skim_theta = (qmag > 0.0 && pmag > 0.0) ? q3.Angle(p3_pi0) : 0.0;
+                        if (qmag > 0.0)
+                        {
+                            const TVector3 qhat = q3 * (1.0 / qmag);
+                            const TVector3 ptv = p3_pi0 - (p3_pi0.Dot(qhat)) * qhat;
+                            g_skim_pt = ptv.Mag();
+                        }
+                        else
+                        {
+                            g_skim_pt = 0.0;
+                        }
+
+                        // phi: angle between lepton plane and hadron plane (atan2 form, range [-pi,pi])
+                        g_skim_phi = 0.0;
+                        const TVector3 n_lep = k_in.Vect().Cross(k_out.Vect());
+                        const TVector3 n_had = p3_pi0.Cross(q3); // hadron-plane normal (p_pi0 x q) convention
+                        if (n_lep.Mag() > 0.0 && n_had.Mag() > 0.0 && qmag > 0.0)
+                        {
+                            const TVector3 nlep_hat = n_lep.Unit();
+                            const TVector3 nhad_hat = n_had.Unit();
+                            const TVector3 qhat = q3.Unit();
+                            const double num = qhat.Dot(nlep_hat.Cross(nhad_hat));
+                            const double den = nlep_hat.Dot(nhad_hat);
+                            g_skim_phi = std::atan2(num, den);
+                        }
+
+                        // t = (p - p')^2 with p' taken as missing 4-vector
+                        TLorentzVector p_in(0.0, 0.0, 0.0, mp);
+                        TLorentzVector p_recoil = (k_in + p_in) - (k_out + p4_pi0);
+                        g_skim_t = (p_in - p_recoil).M2();
+
                         g_tSkim->Fill();
                     }
                 }
@@ -1728,6 +1840,37 @@ int main(int argc, char **argv)
                     kDN_v5 = cfg["timing"]["kDN"].as<double>();
                 }
 
+
+                // Beam / NPS geometry (optional)
+                // Supported YAML keys (any of these forms are accepted):
+                //   geometry: { Ebeam_GeV: 10.5435, NPS_theta_deg: -13.43, NPS_dist_cm: 407.0 }
+                //   Ebeam_GeV: 10.5435
+                //   nps: { theta_deg: -13.43, dist_cm: 407.0 }
+                if (cfg["geometry"] || cfg["Ebeam_GeV"] || cfg["Ebeam"] || cfg["beam_energy_GeV"] || cfg["nps"])
+                {
+                    YAML::Node geo = cfg["geometry"] ? cfg["geometry"] : cfg;
+
+                    // beam energy
+                    if (geo["Ebeam_GeV"]) gEbeam_GeV = geo["Ebeam_GeV"].as<double>();
+                    else if (geo["Ebeam"]) gEbeam_GeV = geo["Ebeam"].as<double>();
+                    else if (geo["beam_energy_GeV"]) gEbeam_GeV = geo["beam_energy_GeV"].as<double>();
+
+                    // NPS geometry
+                    if (geo["NPS_theta_deg"]) gNPS_theta_deg = geo["NPS_theta_deg"].as<double>();
+                    if (geo["NPS_dist_cm"])   gNPS_dist_cm   = geo["NPS_dist_cm"].as<double>();
+
+                    if (cfg["nps"])
+                    {
+                        auto nps = cfg["nps"];
+                        if (nps["theta_deg"]) gNPS_theta_deg = nps["theta_deg"].as<double>();
+                        if (nps["dist_cm"])   gNPS_dist_cm   = nps["dist_cm"].as<double>();
+                    }
+
+                    std::cerr << "[cfg] geometry: Ebeam=" << gEbeam_GeV
+                              << " GeV, NPS_theta_deg=" << gNPS_theta_deg
+                              << " deg, NPS_dist_cm=" << gNPS_dist_cm << " cm\n";
+                }
+
                 // (optional) invariant-mass fit window
                 if (cfg["mgg_fit"] && (cfg["mgg_fit"]["mmin"] || cfg["mgg_fit"]["mmax"]))
                 {
@@ -1871,6 +2014,23 @@ int main(int argc, char **argv)
     g_tSkim->Branch("mgg", &g_skim_mgg, "mgg/D");
     g_tSkim->Branch("w_sig", &g_skim_wsig, "w_sig/D");
     g_tSkim->Branch("pass_pi0", &g_skim_pass_pi0, "pass_pi0/I");
+
+    // physics variables (target rest frame / standard DIS)
+    g_tSkim->Branch("Q2", &g_skim_Q2, "Q2/D");
+    g_tSkim->Branch("W", &g_skim_W, "W/D");
+    g_tSkim->Branch("nu", &g_skim_nu, "nu/D");
+
+    g_tSkim->Branch("t", &g_skim_t, "t/D");
+    g_tSkim->Branch("pt", &g_skim_pt, "pt/D");
+
+    g_tSkim->Branch("theta", &g_skim_theta, "theta/D");
+    g_tSkim->Branch("phi", &g_skim_phi, "phi/D");
+
+    g_tSkim->Branch("xB", &g_skim_xB, "xB/D");
+    g_tSkim->Branch("z", &g_skim_z, "z/D");
+
+    g_tSkim->Branch("Mx_raw", &g_skim_Mx_raw, "Mx_raw/D");
+    g_tSkim->Branch("Mx_corr", &g_skim_Mx_corr, "Mx_corr/D");
 
     // ---- Now run event loops (data and dummy) ----
     Pack D("data");
@@ -2237,11 +2397,17 @@ int main(int argc, char **argv)
                 s_dummyA[ib] = (den > 0.0) ? (num / den) : 0.0;
             }
 
-            // Input skim: eventnum, mgg, w_sig, pass_pi0
+            // Input skim: eventnum, mgg, w_sig, pass_pi0, and physics variables
             Long64_t in_evnum = 0;
             double in_mgg = 0.0;
             double in_wsig = 0.0;
             int in_pass = 0;
+
+            double in_Q2 = 0.0, in_W = 0.0, in_nu = 0.0;
+            double in_t = 0.0, in_pt = 0.0;
+            double in_theta = 0.0, in_phi = 0.0;
+            double in_xB = 0.0, in_z = 0.0;
+            double in_Mx_raw = 0.0, in_Mx_corr = 0.0;
 
             g_tSkim->SetBranchStatus("*", 0);
             g_tSkim->SetBranchStatus("eventnum", 1);
@@ -2249,10 +2415,34 @@ int main(int argc, char **argv)
             g_tSkim->SetBranchStatus("w_sig", 1);
             g_tSkim->SetBranchStatus("pass_pi0", 1);
 
+            g_tSkim->SetBranchStatus("Q2", 1);
+            g_tSkim->SetBranchStatus("W", 1);
+            g_tSkim->SetBranchStatus("nu", 1);
+            g_tSkim->SetBranchStatus("t", 1);
+            g_tSkim->SetBranchStatus("pt", 1);
+            g_tSkim->SetBranchStatus("theta", 1);
+            g_tSkim->SetBranchStatus("phi", 1);
+            g_tSkim->SetBranchStatus("xB", 1);
+            g_tSkim->SetBranchStatus("z", 1);
+            g_tSkim->SetBranchStatus("Mx_raw", 1);
+            g_tSkim->SetBranchStatus("Mx_corr", 1);
+
             g_tSkim->SetBranchAddress("eventnum", &in_evnum);
             g_tSkim->SetBranchAddress("mgg", &in_mgg);
             g_tSkim->SetBranchAddress("w_sig", &in_wsig);
             g_tSkim->SetBranchAddress("pass_pi0", &in_pass);
+
+            g_tSkim->SetBranchAddress("Q2", &in_Q2);
+            g_tSkim->SetBranchAddress("W", &in_W);
+            g_tSkim->SetBranchAddress("nu", &in_nu);
+            g_tSkim->SetBranchAddress("t", &in_t);
+            g_tSkim->SetBranchAddress("pt", &in_pt);
+            g_tSkim->SetBranchAddress("theta", &in_theta);
+            g_tSkim->SetBranchAddress("phi", &in_phi);
+            g_tSkim->SetBranchAddress("xB", &in_xB);
+            g_tSkim->SetBranchAddress("z", &in_z);
+            g_tSkim->SetBranchAddress("Mx_raw", &in_Mx_raw);
+            g_tSkim->SetBranchAddress("Mx_corr", &in_Mx_corr);
 
             // Output skim written to the file: adds w_phys
             TTree *tSkimOut = new TTree("Skim", "Skim (pi0 2sigma, dummy+OptionA physics weights)");
@@ -2265,12 +2455,35 @@ int main(int argc, char **argv)
             int out_pass = 0;
             double out_wsignal = 0.0;
 
+            double out_Q2 = 0.0, out_W = 0.0, out_nu = 0.0;
+            double out_t = 0.0, out_pt = 0.0;
+            double out_theta = 0.0, out_phi = 0.0;
+            double out_xB = 0.0, out_z = 0.0;
+            double out_Mx_raw = 0.0, out_Mx_corr = 0.0;
+
             tSkimOut->Branch("eventnum", &out_evnum, "eventnum/l");
             tSkimOut->Branch("mgg", &out_mgg, "mgg/D");
             tSkimOut->Branch("w_sig", &out_wsig, "w_sig/D");
             tSkimOut->Branch("w_phys", &out_wphys, "w_phys/D");
             tSkimOut->Branch("pass_pi0", &out_pass, "pass_pi0/I");
             tSkimOut->Branch("w_signal", &out_wsignal, "w_signal/D");
+
+            // carry-through physics variables from the input skim
+            tSkimOut->Branch("Q2", &out_Q2, "Q2/D");
+            tSkimOut->Branch("W", &out_W, "W/D");
+            tSkimOut->Branch("nu", &out_nu, "nu/D");
+
+            tSkimOut->Branch("t", &out_t, "t/D");
+            tSkimOut->Branch("pt", &out_pt, "pt/D");
+
+            tSkimOut->Branch("theta", &out_theta, "theta/D");
+            tSkimOut->Branch("phi", &out_phi, "phi/D");
+
+            tSkimOut->Branch("xB", &out_xB, "xB/D");
+            tSkimOut->Branch("z", &out_z, "z/D");
+
+            tSkimOut->Branch("Mx_raw", &out_Mx_raw, "Mx_raw/D");
+            tSkimOut->Branch("Mx_corr", &out_Mx_corr, "Mx_corr/D");
 
             const Long64_t nentries = g_tSkim->GetEntries();
             for (Long64_t i = 0; i < nentries; ++i)
@@ -2281,6 +2494,19 @@ int main(int argc, char **argv)
                 out_mgg = in_mgg;
                 out_wsig = in_wsig;
                 out_pass = in_pass;
+
+                // carry-through physics variables
+                out_Q2 = in_Q2;
+                out_W = in_W;
+                out_nu = in_nu;
+                out_t = in_t;
+                out_pt = in_pt;
+                out_theta = in_theta;
+                out_phi = in_phi;
+                out_xB = in_xB;
+                out_z = in_z;
+                out_Mx_raw = in_Mx_raw;
+                out_Mx_corr = in_Mx_corr;
 
                 // Map mgg to Mgg bin in OUT.hMG_Sub
                 int ib = hSub->GetXaxis()->FindBin(in_mgg);
